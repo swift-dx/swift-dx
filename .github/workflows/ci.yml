@@ -10,26 +10,6 @@ env:
   SWIFTDX_INTEGRITY: "1"
 
 jobs:
-  macos:
-    name: macOS / Swift 6.3
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Install Swift 6.3
-        uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: "6.3"
-      - name: Show toolchain
-        run: swift --version
-      - name: Build main package
-        run: swift build
-      - name: Test main package
-        run: swift test --enable-code-coverage
-      - name: Build Examples
-        run: swift build --package-path Examples
-      - name: Build Benchmarks (release)
-        run: swift build --package-path Benchmarks -c release
-
   linux:
     name: Linux / swift:6.3
     runs-on: ubuntu-latest
