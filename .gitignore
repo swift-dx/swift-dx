@@ -1,0 +1,91 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# SwiftPM
+.build/
+.build-*/
+.swiftpm/
+Packages/
+Package.pins
+
+# Lockfiles. swift-dx ships as a set of libraries: consumers resolve fresh
+# against our Package.swift version ranges, so we do not pin transitives
+# for them. Examples is a contributor sandbox, same posture. Integrity
+# (under Tooling/) is a standalone publishable tool whose deterministic
+# build matters, so its Package.resolved IS tracked.
+/Package.resolved
+/Examples/Package.resolved
+
+# Xcode (generated when opening Package.swift in Xcode)
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+*.moved-aside
+*.hmap
+
+# Compiled artifacts
+*.o
+*.a
+*.dylib
+*.so
+*.bc
+*.swiftmodule
+*.swiftdoc
+*.swiftsourceinfo
+*.swiftinterface
+*.resource_bundle_accessor
+*.dSYM/
+*.dSYM.zip
+
+# DocC
+*.doccarchive/
+
+# Coverage (Swift native llvm-cov inputs)
+*.profraw
+*.profdata
+
+# Logs / temp / backup
+*.log
+*.tmp
+*.bak
+*.orig
+*.rej
+
+# Editor scratch (vim/emacs swap files, not IDE configs)
+*.swp
+*.swo
+.*.sw[a-p]
+*~
+\#*\#
+.#*
+
+# Linux
+core
+core.*
+
+# Secrets / local environment
+.env
+.env.*
+.netrc
+*.pem
+*.key

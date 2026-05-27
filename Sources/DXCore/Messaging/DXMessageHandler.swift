@@ -1,0 +1,19 @@
+//===----------------------------------------------------------------------===//
+//
+// This source file is part of the SwiftDX open source project
+//
+// Copyright (c) 2026 SwiftDX Contributors
+// Licensed under Apache License v2.0. See LICENSE for license information.
+//
+// SPDX-License-Identifier: Apache-2.0
+//
+//===----------------------------------------------------------------------===//
+
+public protocol DXMessageHandler<Message, Failure>: Sendable {
+
+    associatedtype Message: Sendable
+    associatedtype Failure: Error
+
+    func receive(_ message: Message) async
+    func receive(error: Failure) async
+}

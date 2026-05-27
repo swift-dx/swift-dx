@@ -1,0 +1,44 @@
+{
+  "targets": {
+    "default": [
+      "G001",
+      "G002",
+      "G003",
+      "G004",
+      "G005",
+      "G006",
+      "S001",
+      "S002",
+      "S003",
+      "S004",
+      "S006",
+      "S007",
+      "S008",
+      "S009",
+      "S010",
+      "S011"
+    ],
+    "DXCore": "default",
+    "DXJetStream": "default",
+    "DXCoreTests": "default",
+    "DXJetStreamTests": "default",
+    "DXJetStreamIntegration": "default"
+  },
+  "exemptions": [
+    {
+      "path": "Sources/DXJetStream/Internal/Tracing/TracePropagation.swift",
+      "rules": ["S002"],
+      "reason": "The Extractor protocol from swift-distributed-tracing requires extract(key:from:) -> String?. The Optional return is mandated by the third-party protocol contract."
+    },
+    {
+      "path": "IntegrationTests/DXJetStreamIntegration/TracingIntegrationTests.swift",
+      "rules": ["S002"],
+      "reason": "The integration test conforms a test fixture to swift-distributed-tracing's Extractor protocol (extract(key:from:) -> String?) and uses ServiceContext's custom-key subscript which is Optional by API contract. Both are third-party-protocol constraints."
+    },
+    {
+      "path": "Tests/DXJetStreamTests/CapturingLogHandler.swift",
+      "rules": ["S002"],
+      "reason": "swift-log's LogHandler protocol mandates a subscript returning Logger.Metadata.Value? and a log(...) method taking metadata: Logger.Metadata?. Both Optional surfaces are required by the third-party protocol."
+    }
+  ]
+}
