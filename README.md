@@ -18,10 +18,11 @@ All direct dependencies are sourced from `github.com/apple/*` or `github.com/swi
 
 | Library | Purpose |
 |---------|---------|
-| `DXCore` | Shared foundation types used across the stack. |
-| `DXJetStream` | NATS JetStream client. |
-| `DXClickHouse` | ClickHouse Native protocol client. Native POSIX-socket transport, zero-allocation view types. See [Sources/DXClickHouse/README.md](Sources/DXClickHouse/README.md). |
-| `DXJSONSchema` | JSON Schema Draft 2020-12 validator. Compile-once, validate-many; Foundation-free byte parser; hot-swappable, type-grouped schema registry with parallel batch verification. 100% mainline Draft 2020-12 conformance. See [Sources/DXJSONSchema/README.md](Sources/DXJSONSchema/README.md). |
+| [`DXCore`](Sources/DXCore) | Shared foundation types. |
+| [`DXJetStream`](Sources/DXJetStream) | NATS JetStream client. |
+| [`DXClickHouse`](Sources/DXClickHouse) | ClickHouse Native protocol client. |
+| [`DXRedis`](Sources/DXRedis) | Redis client. |
+| [`DXJSONSchema`](Sources/DXJSONSchema) | JSON Schema Draft 2020-12 validator. |
 
 ## Installation
 
@@ -69,6 +70,32 @@ Full overload reference, configuration fields, error cases, and usage
 patterns are in [Sources/DXClickHouse/README.md](Sources/DXClickHouse/README.md).
 The DocC catalog inside the module has the per-mode benchmark numbers
 and a lifecycle/performance-tuning guide.
+
+## DXRedis
+
+Pure-Swift Redis 8 client built on SwiftNIO. A `RedisClient` owns a
+bounded pool of pipelining RESP2 connections; one shared client serves
+the whole process, concurrent callers run in parallel up to the pool
+size, and a single caller can pile thousands of commands onto one
+connection. Absent values are a named `Lookup` case rather than `nil`,
+every public throwing function uses typed `throws(RedisError)`, and
+payloads accept `[UInt8]`, `ByteBuffer`, `String`, and `Codable`
+(JSON). Per-request timeouts, transient-failure retries, and
+background reconnection are built in.
+
+```swift
+import DXRedis
+
+let redis = try await Redis.connect(
+    RedisConfiguration(endpoint: RedisEndpoint(host: "127.0.0.1", port: 6379))
+)
+try await redis.set("user:42:name", to: "Ada")
+let name = try await redis.getString("user:42:name")
+```
+
+Configuration fields, the full command surface, error cases, and the
+ServiceLifecycle integration are documented in
+[Sources/DXRedis/README.md](Sources/DXRedis/README.md).
 
 ## DXJSONSchema
 
