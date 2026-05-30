@@ -101,6 +101,23 @@ let package = Package(
                 ),
             ]
         ),
+        .executableTarget(
+            name: "RedisBenchmark",
+            dependencies: [
+                .product(name: "DXRedis", package: "swift-dx"),
+            ],
+            path: "Sources/Redis",
+            exclude: ["README.md"],
+            swiftSettings: [
+                .unsafeFlags(
+                    [
+                        "-enforce-exclusivity=unchecked",
+                        "-cross-module-optimization",
+                    ],
+                    .when(configuration: .release)
+                ),
+            ]
+        ),
     ],
     swiftLanguageModes: [.v6]
 )
