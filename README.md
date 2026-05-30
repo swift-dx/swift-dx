@@ -8,7 +8,7 @@
 
 SwiftDX is a set of Swift libraries for the data layer of server-side applications.
 
-Libraries are designed for predictable low-latency, high-throughput operation on the data path. Each library is benchmarked on Ubuntu Linux under production-equivalent conditions against reference clients from established ecosystems on identical hardware, and matches or outperforms them on throughput and tail latency on every workload measured to date. Performance regressions are tracked as bugs.
+Libraries are designed for predictable low-latency, high-throughput operation on the data path. Each library ships with a reproducible benchmark harness exercised on Ubuntu Linux under production-equivalent conditions. Performance regressions are tracked as bugs.
 
 All direct dependencies are sourced from `github.com/apple/*` or `github.com/swift-server/*`. This bounds the supply-chain attack surface, ensures long-term institutional maintenance, and matches the trust posture enterprise consumers apply when auditing transitive dependencies. When functionality is only available in a third-party package, SwiftDX implements it inside `DXCore` rather than introducing the dependency.
 
@@ -20,7 +20,8 @@ All direct dependencies are sourced from `github.com/apple/*` or `github.com/swi
 |---------|---------|
 | `DXCore` | Shared foundation types used across the stack. |
 | `DXJetStream` | NATS JetStream client. |
-| `DXClickHouse` | ClickHouse Native protocol client. POSIX-socket transport, zero-allocation view types, faster than the reference C++ client on every measured mode. See [Sources/DXClickHouse/README.md](Sources/DXClickHouse/README.md). |
+| `DXClickHouse` | ClickHouse Native protocol client. Native POSIX-socket transport, zero-allocation view types. See [Sources/DXClickHouse/README.md](Sources/DXClickHouse/README.md). |
+| `DXJSONSchema` | JSON Schema Draft 2020-12 validator. Compile-once, validate-many; Foundation-free byte parser; hot-swappable, type-grouped schema registry with parallel batch verification. 100% mainline Draft 2020-12 conformance. See [Sources/DXJSONSchema/README.md](Sources/DXJSONSchema/README.md). |
 
 ## Installation
 
@@ -52,9 +53,9 @@ import DXJetStream
 ClickHouse Native protocol client. Direct POSIX-socket transport (no
 NIO, no event loop), typed Codable surface, multi-endpoint connection
 pool with failover, built-in reconnect, per-query timeouts, and
-`swift-service-lifecycle` integration. Benchmarked against the
-reference ClickHouse C++ client; matches or outperforms it on every
-measured workload.
+`swift-service-lifecycle` integration. Zero-allocation view types
+expose the wire buffer directly for the hot path; the Codable surface
+covers the ergonomic path.
 
 ```swift
 import DXClickHouse
@@ -68,6 +69,30 @@ Full overload reference, configuration fields, error cases, and usage
 patterns are in [Sources/DXClickHouse/README.md](Sources/DXClickHouse/README.md).
 The DocC catalog inside the module has the per-mode benchmark numbers
 and a lifecycle/performance-tuning guide.
+
+## DXJSONSchema
+
+JSON Schema Draft 2020-12 validator. Compile a schema once, then validate
+many instances against it. The instance parser is a Foundation-free byte
+parser; strings are sliced from the source buffer rather than copied. A
+hot-swappable, type-grouped registry handles many schemas with atomic bulk
+updates and parallel, ID-tagged batch verification. Passes 100% of the
+mainline Draft 2020-12 official test suite.
+
+```swift
+import DXJSONSchema
+
+let schema = try JSONSchema.compile(#"{"type":"object","required":["id"],"properties":{"id":{"type":"integer"}}}"#)
+let result = schema.validate(#"{"id": 42}"#)
+if !result.isValid {
+    for violation in result.violations { print(violation.instanceLocation, violation.message) }
+}
+```
+
+The usage forms (`[UInt8]`/`String`/`ByteBuffer`/`Encodable`), the registry
+and batch-verify API, error cases, the performance-testing harness, and the
+memory characteristics under sustained load are documented in
+[Sources/DXJSONSchema/README.md](Sources/DXJSONSchema/README.md).
 
 ## Requirements
 

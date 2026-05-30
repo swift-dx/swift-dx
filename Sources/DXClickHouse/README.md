@@ -11,8 +11,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # DXClickHouse
 
-Swift native ClickHouse client. POSIX-socket transport, zero-allocation
-view types, faster than the reference C++ client on every measured mode.
+Swift native ClickHouse client. Native POSIX-socket transport,
+zero-allocation view types.
 
 ## Quick start
 
@@ -113,8 +113,8 @@ types backed by the wire buffer (e.g. `ClickHouseFixedStringView`,
 `ClickHouseMapView`). They let row-by-row consumers iterate result
 blocks without materialising `String`, `[UInt8]`, or `Dictionary`
 copies until a value is actually read. Use the typed Codable surface
-for ergonomics; reach for the view types when you have profiled and
-need the last ~1.5x of throughput.
+for ergonomics; reach for the view types when allocation overhead
+dominates decode time in a profile.
 
 ## Usage patterns
 
@@ -393,16 +393,25 @@ intentional.
 
 ## Performance characteristics
 
-`DXClickHouse` is benchmarked against the reference ClickHouse C++
-client and against an NIO-based reference Swift transport. On the
-measured workload set (point lookups, columnar scans, multi-row
-SELECT, batched INSERT, LowCardinality/Map projections, Array reads,
-and several production-shaped query patterns) `DXClickHouse` matches
-or outperforms both on throughput and tail latency.
+On localhost loopback against ClickHouse 26.5, a 10M-row × 3-column
+SELECT drains in roughly 130ms (about 2.4 GB/s sustained wire
+throughput) and materialises into Swift values in roughly 2.8s. The
+connection pool acquires an idle connection in single-digit
+microseconds when one is available; opening a fresh connection
+includes the Native handshake and is bounded by network round-trip
+time. Per-block decode is bounded by the wire arrival rate; per-row
+Codable decode adds a roughly constant ~700ns per field on top of the
+columnar parse.
 
-The 3-way bench, per-mode floor numbers, and the cost of every layer
-(wire → Codable → async → pool → reconnect) are in the DocC
-performance-tuning catalog.
+The transport is `POSIX socket → arena-backed wire decoder → optional
+Codable bridge → async actor → optional pool`. Each layer's cost is
+measurable in isolation against the layer below it. Numbers vary with
+hardware, schema, and result-set shape; the bench harness below is
+the reproducible source.
+
+Full bench harness in `Benchmarks/Sources/ClickHouse/` and
+`Benchmarks/run-real-workloads.sh`. The DocC performance-tuning
+catalog documents per-layer cost and tuning guidance.
 
 ### Picking an overload
 
