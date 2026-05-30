@@ -55,6 +55,70 @@ let package = Package(
                 ),
             ]
         ),
+        .executableTarget(
+            name: "ClickHouseRawBenchmark",
+            dependencies: [
+                .product(name: "DXClickHouseRaw", package: "swift-dx"),
+            ],
+            path: "Sources/ClickHouseRaw",
+            swiftSettings: [
+                .unsafeFlags(
+                    [
+                        "-enforce-exclusivity=unchecked",
+                        "-cross-module-optimization",
+                    ],
+                    .when(configuration: .release)
+                ),
+            ]
+        ),
+        .executableTarget(
+            name: "ClickHouseRawAsyncBenchmark",
+            dependencies: [
+                .product(name: "DXClickHouseRaw", package: "swift-dx"),
+            ],
+            path: "Sources/ClickHouseRawAsync",
+            swiftSettings: [
+                .unsafeFlags(
+                    [
+                        "-enforce-exclusivity=unchecked",
+                        "-cross-module-optimization",
+                    ],
+                    .when(configuration: .release)
+                ),
+            ]
+        ),
+        .executableTarget(
+            name: "ClickHouseRawPoolBenchmark",
+            dependencies: [
+                .product(name: "DXClickHouseRaw", package: "swift-dx"),
+            ],
+            path: "Sources/ClickHouseRawPool",
+            swiftSettings: [
+                .unsafeFlags(
+                    [
+                        "-enforce-exclusivity=unchecked",
+                        "-cross-module-optimization",
+                    ],
+                    .when(configuration: .release)
+                ),
+            ]
+        ),
+        .executableTarget(
+            name: "ClickHouseRawStability",
+            dependencies: [
+                .product(name: "DXClickHouseRaw", package: "swift-dx"),
+            ],
+            path: "Sources/ClickHouseRawStability",
+            swiftSettings: [
+                .unsafeFlags(
+                    [
+                        "-enforce-exclusivity=unchecked",
+                        "-cross-module-optimization",
+                    ],
+                    .when(configuration: .release)
+                ),
+            ]
+        ),
     ],
     swiftLanguageModes: [.v6]
 )

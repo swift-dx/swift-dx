@@ -26,6 +26,8 @@
     "DXClickHouse": "default",
     "DXClickHouseTests": "default",
     "DXClickHouseIntegration": "default",
+    "DXClickHouseRaw": [],
+    "DXClickHouseRawTests": [],
     "DXJSONSchema": "default",
     "DXJSONSchemaTests": "default",
     "DXJSONSchemaComplianceTests": "default"

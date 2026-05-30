@@ -41,6 +41,7 @@ let package = Package(
         .library(name: "DXCore", targets: ["DXCore"]),
         .library(name: "DXJetStream", targets: ["DXJetStream"]),
         .library(name: "DXClickHouse", targets: ["DXClickHouse"]),
+        .library(name: "DXClickHouseRaw", targets: ["DXClickHouseRaw"]),
         .library(name: "DXRedis", targets: ["DXRedis"]),
         .library(name: "DXJSONSchema", targets: ["DXJSONSchema"]),
     ],
@@ -91,6 +92,9 @@ let package = Package(
                 .product(name: "Tracing", package: "swift-distributed-tracing"),
             ],
             plugins: integrityPlugins
+        ),
+        .target(
+            name: "DXClickHouseRaw"
         ),
         .testTarget(
             name: "DXCoreTests",
@@ -145,6 +149,10 @@ let package = Package(
             ],
             path: "IntegrationTests/DXClickHouseIntegration",
             plugins: integrityPlugins
+        ),
+        .testTarget(
+            name: "DXClickHouseRawTests",
+            dependencies: ["DXClickHouseRaw"]
         ),
         .target(
             name: "DXJSONSchema",
