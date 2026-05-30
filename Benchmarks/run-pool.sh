@@ -19,9 +19,15 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BENCH_ROOT="$REPO_ROOT/Benchmarks"
+
+BENCH_CACHE_ROOT="${BENCH_CACHE_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/swift-dx-bench}"
+BENCH_RESULTS_DIR="${BENCH_RESULTS_DIR:-$BENCH_CACHE_ROOT/results}"
+BENCH_VENDOR_DIR="${BENCH_VENDOR_DIR:-$BENCH_CACHE_ROOT/vendor}"
+BENCH_BUILD_DIR="${BENCH_BUILD_DIR:-$BENCH_CACHE_ROOT/build}"
+
 POOL_BIN="$BENCH_ROOT/.build/release/ClickHousePoolBenchmark"
-CPP_BIN="$BENCH_ROOT/Tooling/cpp-bench/build/dx_clickhouse_cpp_bench"
-RESULTS_DIR="${RESULTS_DIR:-$BENCH_ROOT/results/raw-pool}"
+CPP_BIN="${CPP_BIN:-$BENCH_BUILD_DIR/cpp-bench/dx_clickhouse_cpp_bench}"
+RESULTS_DIR="${RESULTS_DIR:-$BENCH_RESULTS_DIR/raw-pool}"
 
 if [[ ! -x "$POOL_BIN" ]]; then
     echo "error: pool bench binary not found at $POOL_BIN" >&2

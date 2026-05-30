@@ -11,7 +11,16 @@ endif()
 
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 
-set(CLICKHOUSE_CPP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../clickhouse-cpp"
+if(DEFINED ENV{BENCH_VENDOR_DIR})
+    set(_DEFAULT_CLICKHOUSE_CPP_ROOT "$ENV{BENCH_VENDOR_DIR}/clickhouse-cpp")
+elseif(DEFINED ENV{BENCH_CACHE_ROOT})
+    set(_DEFAULT_CLICKHOUSE_CPP_ROOT "$ENV{BENCH_CACHE_ROOT}/vendor/clickhouse-cpp")
+elseif(DEFINED ENV{XDG_CACHE_HOME})
+    set(_DEFAULT_CLICKHOUSE_CPP_ROOT "$ENV{XDG_CACHE_HOME}/swift-dx-bench/vendor/clickhouse-cpp")
+else()
+    set(_DEFAULT_CLICKHOUSE_CPP_ROOT "$ENV{HOME}/.cache/swift-dx-bench/vendor/clickhouse-cpp")
+endif()
+set(CLICKHOUSE_CPP_ROOT "${_DEFAULT_CLICKHOUSE_CPP_ROOT}"
     CACHE PATH "Path to the clickhouse-cpp source tree")
 set(CLICKHOUSE_CPP_BUILD "${CLICKHOUSE_CPP_ROOT}/build"
     CACHE PATH "Path to the clickhouse-cpp CMake build output")

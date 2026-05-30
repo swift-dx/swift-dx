@@ -47,9 +47,15 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BENCH_ROOT="$REPO_ROOT/Benchmarks"
+
+BENCH_CACHE_ROOT="${BENCH_CACHE_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/swift-dx-bench}"
+BENCH_RESULTS_DIR="${BENCH_RESULTS_DIR:-$BENCH_CACHE_ROOT/results}"
+BENCH_VENDOR_DIR="${BENCH_VENDOR_DIR:-$BENCH_CACHE_ROOT/vendor}"
+BENCH_BUILD_DIR="${BENCH_BUILD_DIR:-$BENCH_CACHE_ROOT/build}"
+
 SWIFT_BIN="$BENCH_ROOT/.build/release/ClickHouseBenchmark"
-CPP_BIN="$BENCH_ROOT/Tooling/cpp-bench/build/dx_clickhouse_cpp_bench"
-RESULTS_DIR="${RESULTS_DIR:-$BENCH_ROOT/results/real-workloads}"
+CPP_BIN="${CPP_BIN:-$BENCH_BUILD_DIR/cpp-bench/dx_clickhouse_cpp_bench}"
+RESULTS_DIR="${RESULTS_DIR:-$BENCH_RESULTS_DIR/real-workloads}"
 
 WARMUP="${CH_BENCH_HYPERFINE_WARMUP:-2}"
 RUNS="${CH_BENCH_HYPERFINE_RUNS:-5}"
@@ -74,7 +80,7 @@ if [[ ! -x "$SWIFT_BIN" ]]; then
 fi
 if [[ ! -x "$CPP_BIN" ]]; then
     echo "error: C++ bench binary not found at $CPP_BIN" >&2
-    echo "       run: (cd Benchmarks/Tooling/cpp-bench/build && make)" >&2
+    echo "       build it under \$BENCH_BUILD_DIR/cpp-bench (default: $BENCH_BUILD_DIR/cpp-bench)" >&2
     exit 1
 fi
 if ! command -v hyperfine >/dev/null 2>&1; then
