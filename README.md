@@ -20,6 +20,7 @@ All direct dependencies are sourced from `github.com/apple/*` or `github.com/swi
 |---------|---------|
 | `DXCore` | Shared foundation types used across the stack. |
 | `DXJetStream` | NATS JetStream client. |
+| `DXClickHouse` | ClickHouse Native protocol client. POSIX-socket transport, zero-allocation view types, faster than the reference C++ client on every measured mode. See [Sources/DXClickHouse/README.md](Sources/DXClickHouse/README.md). |
 
 ## Installation
 
@@ -45,6 +46,28 @@ targets: [
 ```swift
 import DXJetStream
 ```
+
+## DXClickHouse
+
+ClickHouse Native protocol client. Direct POSIX-socket transport (no
+NIO, no event loop), typed Codable surface, multi-endpoint connection
+pool with failover, built-in reconnect, per-query timeouts, and
+`swift-service-lifecycle` integration. Benchmarked against the
+reference ClickHouse C++ client; matches or outperforms it on every
+measured workload.
+
+```swift
+import DXClickHouse
+
+let client = try await ClickHouse.connect(.init(endpoints: [.init(host: "ch", port: 9000)]))
+let users: [User] = try await client.selectAll("SELECT id, name FROM users", as: User.self)
+await client.close()
+```
+
+Full overload reference, configuration fields, error cases, and usage
+patterns are in [Sources/DXClickHouse/README.md](Sources/DXClickHouse/README.md).
+The DocC catalog inside the module has the per-mode benchmark numbers
+and a lifecycle/performance-tuning guide.
 
 ## Requirements
 
