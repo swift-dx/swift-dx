@@ -35,6 +35,14 @@ let package = Package(
             ],
             path: "Sources/JetStream/TestingPatterns"
         ),
+        .executableTarget(
+            name: "RedisQuickStart",
+            dependencies: [
+                .product(name: "DXRedis", package: "swift-dx"),
+                .product(name: "DXCore", package: "swift-dx"),
+            ],
+            path: "Sources/Redis/QuickStart"
+        ),
     ],
     swiftLanguageModes: [.v6]
 )
