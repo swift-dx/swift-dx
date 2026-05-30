@@ -48,6 +48,7 @@ let package = Package(
     targets: [
         .target(
             name: "DXCore",
+            exclude: ["README.md"],
             plugins: integrityPlugins
         ),
         .target(
