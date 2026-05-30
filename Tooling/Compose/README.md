@@ -62,12 +62,53 @@ swift test --filter DXJetStreamIntegration
 To exercise a different node, change `NATS_TEST_PORT` to `4223` or
 `4224`.
 
-## Adding another service (ClickHouse, Redis, …)
+## ClickHouse
 
-Each new service follows the same shape as the NATS nodes:
+One ClickHouse server (`clickhouse/clickhouse-server:26.5-alpine`),
+auto-creates a `test` database. The `default` user is used with an
+empty password — fine for local development, never for anything
+network-reachable.
+
+| Node          | Container               | Native TCP | HTTP   |
+|---------------|-------------------------|------------|--------|
+| `clickhouse1` | `swift-dx-clickhouse1`  | `9000`     | `8123` |
+
+The native TCP port (`9000`) is what `DXClickHouse` talks to. The HTTP
+port (`8123`) is exposed for `clickhouse-client`-style probes and the
+`/ping` healthcheck.
+
+Verify after `up`:
+
+```bash
+curl -s http://localhost:8123/ping     # expects "Ok."
+```
+
+### Running the integration test suite
+
+The DXClickHouse integration suite skips itself unless
+`CH_INTEGRATION_HOST` is set:
+
+```bash
+docker compose -f Tooling/Compose/docker-compose.yml --profile clickhouse up -d
+export CH_INTEGRATION_HOST=localhost
+export CH_INTEGRATION_PORT=9000
+export CH_INTEGRATION_USER=default
+export CH_INTEGRATION_PASSWORD=
+export CH_INTEGRATION_DATABASE=test
+swift test --filter DXClickHouseIntegration
+```
+
+The multi-node suite (`CH_INTEGRATION_HOST_2`), TLS suite
+(`CH_TLS_HOST`, `CH_TLS_CA_PATH`, …), and slow-loris suite stay
+skipped until those env vars are also set; the single-node profile
+above is enough for the main integration matrix.
+
+## Adding another service (Redis, Postgres, …)
+
+Each new service follows the same shape as the existing ones:
 
 1. Add a folder under `Tooling/Compose/` for the service's
-   configuration (e.g. `clickhouse/config.xml`).
+   configuration (e.g. `redis/redis.conf`).
 2. Add a service block to `docker-compose.yml` with:
    - a dedicated `container_name` prefixed `swift-dx-`,
    - `profiles: ["<service>", "all"]`,
@@ -79,9 +120,9 @@ Each new service follows the same shape as the NATS nodes:
 Subset selection works out of the box once profiles are wired up:
 
 ```bash
-# NATS + Redis only
+# NATS + ClickHouse together
 docker compose -f Tooling/Compose/docker-compose.yml \
-  --profile nats --profile redis up -d
+  --profile nats --profile clickhouse up -d
 
 # everything
 docker compose -f Tooling/Compose/docker-compose.yml --profile all up -d

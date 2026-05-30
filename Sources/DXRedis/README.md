@@ -261,6 +261,25 @@ Mechanical style and safety rules (no optionals, typed throws, file headers,
 complexity bounds) are enforced by the `Integrity` build plugin when building with
 `SWIFTDX_INTEGRITY=1`.
 
+## Resource and leak audit
+
+Beyond code review, the client is audited for memory, descriptor, and thread
+leaks under sustained concurrent load. A harness drives one shared client with
+hundreds of concurrent tasks running a randomized mix of reads, writes,
+pipelines, array replies, scripts, locks, and induced timeouts, while four
+independent tools observe it from different angles:
+
+| Check | Tool | Looks for | Result |
+|-------|------|-----------|--------|
+| Sustained load | resident-memory / descriptor / thread sampling | growth that never plateaus | RSS and descriptor counts plateau under load and fall back on shutdown |
+| Allocation profile | heaptrack | per-operation heap growth | peak bounded; retained set fixed, not proportional to operations |
+| Reachability | LeakSanitizer | allocations unreachable at exit | no leak originating in client code |
+| Concurrency | ThreadSanitizer | data races | none reported |
+
+Across millions of operations, resident memory and descriptor and thread counts
+stay bounded and are released when the client shuts down — the signature of no
+leak — and the concurrency primitives run race-free.
+
 ## Requirements
 
 - Swift 6.3+
