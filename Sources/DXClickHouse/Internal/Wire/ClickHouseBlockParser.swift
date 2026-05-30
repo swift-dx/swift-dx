@@ -9,152 +9,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-// Inline wire-format parsing helpers operating directly on
-// `UnsafePointer<UInt8>`. Mirrors the encoding rules used by
-// `Sources/DXClickHouse/Internal/Codec/Binary/`, but without ByteBuffer
-// or any NIO type. Every function takes a base pointer + offset + limit
-// and returns the number of bytes consumed (or throws).
-
-// Internal sentinel thrown by the pointer-pure parsing helpers when
-// the input is well-formed but incomplete (the caller must read more
-// bytes from the socket and retry) versus when the input is structurally
-// malformed (the caller must surface a typed protocolError and tear the
-// connection down). Kept package-internal so it never leaks into the
-// public surface of ClickHouseError; the connection layer is the
-// single conversion boundary.
-public enum ClickHouseParseError: Error, Equatable, Sendable {
-
-    case needsMoreBytes(stage: String)
-    case malformed(stage: String, message: String)
-}
-
-public enum ClickHouseWire {
-
-    public static let uvarintMaxBytes = 10
-
-    // Returns (value, consumedBytes). Throws `.needsMoreBytes` if the
-    // limit is hit before the terminator bit, `.malformed` on >10-byte
-    // overflows.
-    @inlinable
-    public static func readUVarInt(
-        base: UnsafePointer<UInt8>, offset: Int, limit: Int
-    ) throws(ClickHouseParseError) -> (UInt64, Int) {
-        var value: UInt64 = 0
-        var shift: UInt64 = 0
-        var byteIndex = 0
-        while byteIndex < uvarintMaxBytes {
-            let position = offset + byteIndex
-            if position >= limit { throw .needsMoreBytes(stage: "uvarint") }
-            let byte = base[position]
-            if byte < 0x80 {
-                if byteIndex == uvarintMaxBytes - 1, byte > 1 {
-                    throw .malformed(stage: "uvarint", message: "overflow")
-                }
-                value |= UInt64(byte) << shift
-                return (value, byteIndex + 1)
-            }
-            value |= UInt64(byte & 0x7F) << shift
-            shift += 7
-            byteIndex += 1
-        }
-        throw .malformed(stage: "uvarint", message: "overflow")
-    }
-
-    // Reads a length-prefixed string and returns (utf8Slice, consumedBytes).
-    // The returned slice references arena memory; copy out before recv().
-    @inlinable
-    public static func readStringSlice(
-        base: UnsafePointer<UInt8>, offset: Int, limit: Int,
-        maxLength: Int = 1 << 30
-    ) throws(ClickHouseParseError) -> (UnsafeBufferPointer<UInt8>, Int) {
-        let (declared, lengthBytes) = try readUVarInt(base: base, offset: offset, limit: limit)
-        if declared > UInt64(maxLength) {
-            throw .malformed(stage: "string", message: "declared length \(declared) exceeds max \(maxLength)")
-        }
-        let payloadLength = Int(declared)
-        let payloadOffset = offset + lengthBytes
-        if payloadOffset + payloadLength > limit {
-            throw .needsMoreBytes(stage: "string body")
-        }
-        let buffer = UnsafeBufferPointer(start: base + payloadOffset, count: payloadLength)
-        return (buffer, lengthBytes + payloadLength)
-    }
-
-    @inlinable
-    public static func readString(
-        base: UnsafePointer<UInt8>, offset: Int, limit: Int,
-        maxLength: Int = 1 << 30
-    ) throws(ClickHouseParseError) -> (String, Int) {
-        let (slice, consumed) = try readStringSlice(base: base, offset: offset, limit: limit, maxLength: maxLength)
-        if slice.count == 0 { return ("", consumed) }
-        let raw = UnsafeRawBufferPointer(slice)
-        return (String(decoding: raw, as: Unicode.UTF8.self), consumed)
-    }
-
-    @inlinable
-    public static func readFixedInt<T: FixedWidthInteger>(
-        _ type: T.Type, base: UnsafePointer<UInt8>, offset: Int, limit: Int
-    ) throws(ClickHouseParseError) -> (T, Int) {
-        let size = MemoryLayout<T>.size
-        if offset + size > limit { throw .needsMoreBytes(stage: "fixed int") }
-        var value: T = 0
-        withUnsafeMutableBytes(of: &value) { destination in
-            destination.copyMemory(from: UnsafeRawBufferPointer(start: base + offset, count: size))
-        }
-        return (T(littleEndian: value), size)
-    }
-
-    // Encoder helpers. `output` must have enough capacity (10 bytes for
-    // a UVarInt, length-prefix + bytes for a string).
-    @inlinable
-    public static func writeUVarInt(_ value: UInt64, into output: inout [UInt8]) {
-        var remaining = value
-        while remaining >= 0x80 {
-            output.append(UInt8(remaining & 0x7F) | 0x80)
-            remaining >>= 7
-        }
-        output.append(UInt8(remaining))
-    }
-
-    @inlinable
-    public static func writeString(_ value: String, into output: inout [UInt8]) {
-        let utf8 = Array(value.utf8)
-        writeUVarInt(UInt64(utf8.count), into: &output)
-        output.append(contentsOf: utf8)
-    }
-
-    @inlinable
-    public static func writeFixedInt<T: FixedWidthInteger>(_ value: T, into output: inout [UInt8]) {
-        let little = value.littleEndian
-        withUnsafeBytes(of: little) { bytes in
-            output.append(contentsOf: bytes)
-        }
-    }
-}
-
-// Result of parsing a single Data-block body: a row count + a column
-// metadata list. The body bytes themselves remain in the arena; the
-// caller can re-read them through `ClickHouseConnection.lastBlockBytes`
-// if it wants to walk columns inline, or just consume the row count.
-public struct ClickHouseBlock {
-
-    public let rowCount: Int
-    public let columnCount: Int
-    public let columnNames: [String]
-    public let columnTypes: [String]
-    public let bodyStart: Int
-    public let bodyLength: Int
-
-    public init(rowCount: Int, columnCount: Int, columnNames: [String], columnTypes: [String], bodyStart: Int, bodyLength: Int) {
-        self.rowCount = rowCount
-        self.columnCount = columnCount
-        self.columnNames = columnNames
-        self.columnTypes = columnTypes
-        self.bodyStart = bodyStart
-        self.bodyLength = bodyLength
-    }
-}
-
 public enum ClickHouseBlockParser {
 
     // Parses BlockInfo + (columnCount, rowCount) prologue. Stops at the
@@ -203,14 +57,24 @@ public enum ClickHouseBlockParser {
             case 0:
                 return cursor - offset
             case 1:
-                if cursor >= limit { throw .needsMoreBytes(stage: "block info bool") }
-                cursor += 1
+                cursor += try skipBlockInfoBool(cursor: cursor, limit: limit)
             case 2:
-                if cursor + 4 > limit { throw .needsMoreBytes(stage: "block info int32") }
-                cursor += 4
+                cursor += try skipBlockInfoInt32(cursor: cursor, limit: limit)
             default:
                 throw .malformed(stage: "block info", message: "unknown field \(fieldNumber)")
             }
         }
+    }
+
+    @inlinable
+    static func skipBlockInfoBool(cursor: Int, limit: Int) throws(ClickHouseParseError) -> Int {
+        if cursor >= limit { throw .needsMoreBytes(stage: "block info bool") }
+        return 1
+    }
+
+    @inlinable
+    static func skipBlockInfoInt32(cursor: Int, limit: Int) throws(ClickHouseParseError) -> Int {
+        if cursor + 4 > limit { throw .needsMoreBytes(stage: "block info int32") }
+        return 4
     }
 }

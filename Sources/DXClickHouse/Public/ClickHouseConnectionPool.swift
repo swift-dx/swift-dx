@@ -155,23 +155,33 @@ public actor ClickHouseConnectionPool {
         }
     }
 
+    private enum WaiterState {
+        case pending(CheckedContinuation<PooledConnection, Error>)
+        case completed
+    }
+
     private final class Waiter: @unchecked Sendable {
-        var continuation: CheckedContinuation<PooledConnection, Error>?
+        var state: WaiterState
         let token: Int
         init(token: Int, continuation: CheckedContinuation<PooledConnection, Error>) {
             self.token = token
-            self.continuation = continuation
+            self.state = .pending(continuation)
         }
         func resume(returning entry: PooledConnection) {
-            guard let pending = continuation else { return }
-            continuation = nil
-            pending.resume(returning: entry)
+            guard case .pending(let continuation) = state else { return }
+            state = .completed
+            continuation.resume(returning: entry)
         }
         func resume(throwing error: Error) {
-            guard let pending = continuation else { return }
-            continuation = nil
-            pending.resume(throwing: error)
+            guard case .pending(let continuation) = state else { return }
+            state = .completed
+            continuation.resume(throwing: error)
         }
+    }
+
+    private enum EvictionTaskState: Sendable {
+        case idle
+        case running(Task<Void, Never>)
     }
 
     // Pool bookkeeping per connection: the connection itself plus the
@@ -200,7 +210,7 @@ public actor ClickHouseConnectionPool {
     private var evictedByPreflight = 0
     private var endpointFailovers = 0
 
-    private var evictionTask: Task<Void, Never>?
+    private var evictionTaskState: EvictionTaskState = .idle
 
     // Single-endpoint, no-TTL-tuning legacy constructor preserved for
     // backwards compatibility with the original pool surface that
@@ -215,7 +225,7 @@ public actor ClickHouseConnectionPool {
         minConnections: Int = 1,
         maxConnections: Int = 16,
         acquireTimeout: Duration = .seconds(30)
-    ) async throws {
+    ) async throws(Failure) {
         let configuration = Configuration(
             host: host,
             port: port,
@@ -229,7 +239,7 @@ public actor ClickHouseConnectionPool {
         try await self.init(configuration: configuration)
     }
 
-    public init(configuration: Configuration) async throws {
+    public init(configuration: Configuration) async throws(Failure) {
         precondition(configuration.minConnections >= 0, "minConnections must be >= 0")
         precondition(configuration.maxConnections >= 1, "maxConnections must be >= 1")
         precondition(configuration.minConnections <= configuration.maxConnections, "minConnections must be <= maxConnections")
@@ -237,32 +247,69 @@ public actor ClickHouseConnectionPool {
         self.configuration = configuration
         let seedTarget = min(configuration.minConnections, configuration.maxConnections)
         idle.reserveCapacity(configuration.maxConnections)
+        let prewarm = try await Self.prewarmConnections(
+            configuration: configuration,
+            seedTarget: seedTarget,
+            startingIndex: 0
+        )
+        self.nextEndpointIndex = prewarm.endingIndex
+        self.idle.append(contentsOf: prewarm.entries)
+        self.openedTotal = prewarm.entries.count
+        self.endpointFailovers = prewarm.failovers
+        self.startEvictionTask()
+    }
+
+    private struct PrewarmResult {
+        let entries: [PooledConnection]
+        let failovers: Int
+        let endingIndex: Int
+    }
+
+    private static func prewarmConnections(
+        configuration: Configuration,
+        seedTarget: Int,
+        startingIndex: Int
+    ) async throws(Failure) -> PrewarmResult {
         var prewarmed: [PooledConnection] = []
         var prewarmFailovers = 0
+        var cursor = startingIndex
         prewarmed.reserveCapacity(seedTarget)
         for _ in 0..<seedTarget {
-            do {
-                let outcome = try await Self.openWithFailover(
-                    configuration: configuration,
-                    startingIndex: nextEndpointIndex
-                )
-                nextEndpointIndex = (nextEndpointIndex + 1) % configuration.endpoints.count
-                prewarmed.append(outcome.entry)
-                prewarmFailovers += outcome.failoverCount
-            } catch {
-                for opened in prewarmed {
-                    await opened.connection.close()
-                }
-                if let failure = error as? Failure {
-                    throw failure
-                }
-                throw Failure.openFailed(reason: String(describing: error))
-            }
+            let outcome = try await openOrCleanup(
+                configuration: configuration,
+                cursor: cursor,
+                prewarmed: prewarmed
+            )
+            cursor = (cursor + 1) % configuration.endpoints.count
+            prewarmed.append(outcome.entry)
+            prewarmFailovers += outcome.failoverCount
         }
-        self.idle.append(contentsOf: prewarmed)
-        self.openedTotal = prewarmed.count
-        self.endpointFailovers = prewarmFailovers
-        self.startEvictionTask()
+        return PrewarmResult(entries: prewarmed, failovers: prewarmFailovers, endingIndex: cursor)
+    }
+
+    private static func openOrCleanup(
+        configuration: Configuration,
+        cursor: Int,
+        prewarmed: [PooledConnection]
+    ) async throws(Failure) -> FailoverOutcome {
+        do {
+            return try await Self.openWithFailover(
+                configuration: configuration,
+                startingIndex: cursor
+            )
+        } catch let failure as Failure {
+            await closeAll(prewarmed)
+            throw failure
+        } catch {
+            await closeAll(prewarmed)
+            throw Failure.openFailed(reason: String(describing: error))
+        }
+    }
+
+    private static func closeAll(_ entries: [PooledConnection]) async {
+        for opened in entries {
+            await opened.connection.close()
+        }
     }
 
     // Hot path. Single acquire actor-hop on the pool, then the body
@@ -290,13 +337,27 @@ public actor ClickHouseConnectionPool {
     public func close() async {
         guard !isShutdown else { return }
         isShutdown = true
-        evictionTask?.cancel()
-        evictionTask = nil
+        cancelEvictionTask()
+        failPendingWaiters()
+        await closeIdleConnections()
+    }
+
+    private func cancelEvictionTask() {
+        if case .running(let task) = evictionTaskState {
+            task.cancel()
+        }
+        evictionTaskState = .idle
+    }
+
+    private func failPendingWaiters() {
         let pending = waiters
         waiters.removeAll(keepingCapacity: false)
         for waiter in pending {
             waiter.resume(throwing: Failure.poolClosed)
         }
+    }
+
+    private func closeIdleConnections() async {
         let toClose = idle
         idle.removeAll(keepingCapacity: false)
         for entry in toClose {
@@ -325,40 +386,76 @@ public actor ClickHouseConnectionPool {
 
     private func acquire() async throws -> PooledConnection {
         if isShutdown { throw Failure.poolClosed }
-        while var entry = idle.popLast() {
-            if entryIsExpired(entry) {
-                await closeAndCount(entry, by: .evictedByIdleTTLKey)
-                continue
-            }
-            if entryExceedsLifetime(entry) {
-                await closeAndCount(entry, by: .evictedByLifetimeKey)
-                continue
-            }
-            if configuration.preflightPing {
-                let healthy = await preflight(connection: entry.connection)
-                if !healthy {
-                    await closeAndCount(entry, by: .evictedByPreflightKey)
-                    continue
-                }
-            }
-            entry.lastUsedAt = Date()
-            inUseCount += 1
-            leasesGranted += 1
+        switch await reuseHealthyIdleEntry() {
+        case .recycled(let entry):
             return entry
+        case .idleExhausted:
+            break
         }
         if (inUseCount + idle.count) < configuration.maxConnections {
-            inUseCount += 1
-            do {
-                let entry = try await openWithFailover()
-                openedTotal += 1
-                leasesGranted += 1
-                return entry
-            } catch {
-                inUseCount -= 1
-                throw error
-            }
+            return try await openFreshConnection()
         }
         return try await suspendForLease()
+    }
+
+    private enum IdleEntryDecision {
+        case useFreshened(PooledConnection)
+        case evict(PooledConnection, CounterKey)
+    }
+
+    private enum RecycleOutcome {
+        case recycled(PooledConnection)
+        case idleExhausted
+    }
+
+    private enum StalenessCheck {
+        case stale(CounterKey)
+        case fresh
+    }
+
+    private func classifyIdleEntry(_ entry: PooledConnection) async -> IdleEntryDecision {
+        if case .stale(let counter) = synchronousStaleness(of: entry) {
+            return .evict(entry, counter)
+        }
+        if configuration.preflightPing, await !preflight(connection: entry.connection) {
+            return .evict(entry, .evictedByPreflightKey)
+        }
+        var freshened = entry
+        freshened.lastUsedAt = Date()
+        return .useFreshened(freshened)
+    }
+
+    private func synchronousStaleness(of entry: PooledConnection) -> StalenessCheck {
+        if entryIsExpired(entry) { return .stale(.evictedByIdleTTLKey) }
+        if entryExceedsLifetime(entry) { return .stale(.evictedByLifetimeKey) }
+        return .fresh
+    }
+
+    private func reuseHealthyIdleEntry() async -> RecycleOutcome {
+        while let entry = idle.popLast() {
+            switch await classifyIdleEntry(entry) {
+            case .evict(let stale, let counter):
+                await closeAndCount(stale, by: counter)
+            case .useFreshened(let freshened):
+                inUseCount += 1
+                leasesGranted += 1
+                return .recycled(freshened)
+            }
+        }
+        return .idleExhausted
+    }
+
+    private func openFreshConnection() async throws -> PooledConnection {
+        inUseCount += 1
+        do {
+            let entry = try await openWithFailover()
+            openedTotal += 1
+            leasesGranted += 1
+            return entry
+        } catch {
+            inUseCount -= 1
+            throw error
+        }
     }
 
     private func entryIsExpired(_ entry: PooledConnection) -> Bool {
@@ -461,24 +558,48 @@ public actor ClickHouseConnectionPool {
         for _ in 0..<configuration.endpoints.count {
             let index = nextEndpointIndex
             nextEndpointIndex = (nextEndpointIndex + 1) % configuration.endpoints.count
-            do {
-                return try await Self.openConnection(configuration: configuration, endpointIndex: index)
-            } catch let failure as Failure {
-                if case .openFailed(let reason) = failure {
-                    let endpoint = configuration.endpoints[index]
-                    failures.append(ClickHouseEndpointFailure(host: endpoint.host, port: endpoint.port, reason: reason))
-                    endpointFailovers += 1
-                    continue
-                }
-                throw failure
-            } catch {
-                let endpoint = configuration.endpoints[index]
-                failures.append(ClickHouseEndpointFailure(host: endpoint.host, port: endpoint.port, reason: String(describing: error)))
+            switch await Self.tryOpenEndpoint(configuration: configuration, endpointIndex: index) {
+            case .success(let entry):
+                return entry
+            case .softFailed(let endpointFailure):
+                failures.append(endpointFailure)
                 endpointFailovers += 1
-                continue
+            case .hardFailed(let failure):
+                throw failure
             }
         }
         throw Failure.allEndpointsFailed(failures: failures)
+    }
+
+    private enum EndpointOpenAttempt {
+        case success(PooledConnection)
+        case softFailed(ClickHouseEndpointFailure)
+        case hardFailed(Failure)
+    }
+
+    private static func tryOpenEndpoint(
+        configuration: Configuration,
+        endpointIndex: Int
+    ) async -> EndpointOpenAttempt {
+        do {
+            let entry = try await openConnection(configuration: configuration, endpointIndex: endpointIndex)
+            return .success(entry)
+        } catch let failure as Failure {
+            return classifyOpenFailure(failure, endpoint: configuration.endpoints[endpointIndex])
+        } catch {
+            let endpoint = configuration.endpoints[endpointIndex]
+            return .softFailed(ClickHouseEndpointFailure(host: endpoint.host, port: endpoint.port, reason: String(describing: error)))
+        }
+    }
+
+    private static func classifyOpenFailure(
+        _ failure: Failure,
+        endpoint: ClickHouseEndpoint
+    ) -> EndpointOpenAttempt {
+        if case .openFailed(let reason) = failure {
+            return .softFailed(ClickHouseEndpointFailure(host: endpoint.host, port: endpoint.port, reason: reason))
+        }
+        return .hardFailed(failure)
     }
 
     // Result of a static failover walk: the connection plus the number
@@ -501,20 +622,13 @@ public actor ClickHouseConnectionPool {
         let count = configuration.endpoints.count
         for offset in 0..<count {
             let index = (startingIndex + offset) % count
-            do {
-                let entry = try await openConnection(configuration: configuration, endpointIndex: index)
+            switch await tryOpenEndpoint(configuration: configuration, endpointIndex: index) {
+            case .success(let entry):
                 return FailoverOutcome(entry: entry, failoverCount: failures.count)
-            } catch let failure as Failure {
-                if case .openFailed(let reason) = failure {
-                    let endpoint = configuration.endpoints[index]
-                    failures.append(ClickHouseEndpointFailure(host: endpoint.host, port: endpoint.port, reason: reason))
-                    continue
-                }
+            case .softFailed(let endpointFailure):
+                failures.append(endpointFailure)
+            case .hardFailed(let failure):
                 throw failure
-            } catch {
-                let endpoint = configuration.endpoints[index]
-                failures.append(ClickHouseEndpointFailure(host: endpoint.host, port: endpoint.port, reason: String(describing: error)))
-                continue
             }
         }
         throw Failure.allEndpointsFailed(failures: failures)
@@ -540,13 +654,14 @@ public actor ClickHouseConnectionPool {
     private func startEvictionTask() {
         guard configuration.evictionInterval > .zero else { return }
         let interval = configuration.evictionInterval
-        evictionTask = Task { [weak self] in
+        let task = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: interval)
                 if Task.isCancelled { return }
                 await self?.sweepIdleConnections()
             }
         }
+        evictionTaskState = .running(task)
     }
 
     private func sweepIdleConnections() async {
@@ -556,17 +671,19 @@ public actor ClickHouseConnectionPool {
         let snapshot = idle
         idle.removeAll(keepingCapacity: true)
         for entry in snapshot {
-            if entryIsExpired(entry) {
-                await closeAndCount(entry, by: .evictedByIdleTTLKey)
-                continue
-            }
-            if entryExceedsLifetime(entry) {
-                await closeAndCount(entry, by: .evictedByLifetimeKey)
-                continue
-            }
-            survivors.append(entry)
+            await sweepOne(entry, into: &survivors)
         }
         idle = survivors
+    }
+
+    private func sweepOne(_ entry: PooledConnection, into survivors: inout [PooledConnection]) async {
+        if entryIsExpired(entry) {
+            await closeAndCount(entry, by: .evictedByIdleTTLKey)
+        } else if entryExceedsLifetime(entry) {
+            await closeAndCount(entry, by: .evictedByLifetimeKey)
+        } else {
+            survivors.append(entry)
+        }
     }
 
     private func durationToSeconds(_ duration: Duration) -> TimeInterval {

@@ -32,24 +32,33 @@ public enum ClickHouseCodableDecoder {
         body: UnsafeRawBufferPointer
     ) throws(ClickHouseError) -> [ClickHouseNamedColumn] {
         guard let base = body.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-            if block.rowCount == 0 { return [] }
-            throw .protocolError(stage: "decoder.parseTypedColumns", message: "block body pointer is nil")
+            return try emptyOrThrowMissingBody(block: block)
         }
+        return try walkColumns(block: block, base: base, limit: body.count)
+    }
+
+    private static func emptyOrThrowMissingBody(block: ClickHouseBlock) throws(ClickHouseError) -> [ClickHouseNamedColumn] {
+        if block.rowCount == 0 { return [] }
+        throw .protocolError(stage: "decoder.parseTypedColumns", message: "block body pointer is nil")
+    }
+
+    private static func walkColumns(
+        block: ClickHouseBlock,
+        base: UnsafePointer<UInt8>,
+        limit: Int
+    ) throws(ClickHouseError) -> [ClickHouseNamedColumn] {
         var cursor = 0
-        let limit = body.count
         var columns: [ClickHouseNamedColumn] = []
         columns.reserveCapacity(block.columnCount)
         for index in 0..<block.columnCount {
-            let typeName = block.columnTypes[index]
-            let name = block.columnNames[index]
             let parsed = try parseColumn(
-                typeName: typeName,
+                typeName: block.columnTypes[index],
                 rowCount: block.rowCount,
                 base: base,
                 offset: cursor,
                 limit: limit
             )
-            columns.append(ClickHouseNamedColumn(name: name, column: parsed.column))
+            columns.append(ClickHouseNamedColumn(name: block.columnNames[index], column: parsed.column))
             cursor = parsed.nextOffset
         }
         return columns
@@ -65,20 +74,29 @@ public enum ClickHouseCodableDecoder {
         var rows: [T] = []
         rows.reserveCapacity(rowCount)
         for rowIndex in 0..<rowCount {
-            state.rowIndex = rowIndex
-            let decoder = ClickHouseColumnarDecoder(state: state)
-            do {
-                rows.append(try T(from: decoder))
-            } catch let error as ClickHouseError {
-                throw error
-            } catch {
-                throw .protocolError(
-                    stage: "decoder.decodeRows",
-                    message: "row \(rowIndex) decode failed: \(error)"
-                )
-            }
+            try decodeOneRow(into: &rows, type: T.self, state: state, rowIndex: rowIndex)
         }
         return rows
+    }
+
+    private static func decodeOneRow<T: Decodable>(
+        into rows: inout [T],
+        type: T.Type,
+        state: ClickHouseColumnarDecoderState,
+        rowIndex: Int
+    ) throws(ClickHouseError) {
+        state.rowIndex = rowIndex
+        let decoder = ClickHouseColumnarDecoder(state: state)
+        do {
+            rows.append(try T(from: decoder))
+        } catch let error as ClickHouseError {
+            throw error
+        } catch {
+            throw .protocolError(
+                stage: "decoder.decodeRows",
+                message: "row \(rowIndex) decode failed: \(error)"
+            )
+        }
     }
 
     private struct ColumnParseResult {

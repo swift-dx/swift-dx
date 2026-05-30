@@ -17,41 +17,6 @@ import Musl
 import Darwin
 #endif
 
-// Reconnection policy for the raw transport. The connection layer
-// applies exponential backoff between reconnect attempts on transient
-// I/O failures (EPIPE / ECONNRESET on send or recv, recv returning 0
-// for an unexpected mid-stream EOF). Backoff doubles each attempt
-// starting at initialBackoff and is clamped at maxBackoff.
-//
-// `maxAttempts == 0` disables reconnect: the first I/O failure surfaces
-// as `ClickHouseError.socketIOFailed` or `.unexpectedEOF` without
-// any retry. Default of 5 attempts plus the 100ms→5s cap matches the
-// budget called out in the resilience layer-back spec.
-public struct ReconnectionPolicy: Sendable, Equatable {
-
-    public let maxAttempts: Int
-    public let initialBackoff: Duration
-    public let maxBackoff: Duration
-
-    public static let `default` = ReconnectionPolicy(
-        maxAttempts: 5,
-        initialBackoff: .milliseconds(100),
-        maxBackoff: .seconds(5)
-    )
-
-    public static let disabled = ReconnectionPolicy(
-        maxAttempts: 0,
-        initialBackoff: .milliseconds(0),
-        maxBackoff: .milliseconds(0)
-    )
-
-    public init(maxAttempts: Int, initialBackoff: Duration, maxBackoff: Duration) {
-        self.maxAttempts = maxAttempts
-        self.initialBackoff = initialBackoff
-        self.maxBackoff = maxBackoff
-    }
-}
-
 // Minimum-viable synchronous TCP transport for ClickHouse Native
 // protocol. POSIX socket + send + recv, no NIO, no TLS, no async.
 // One arena per connection grows as needed. Caller drives the read
@@ -94,7 +59,7 @@ public final class ClickHouseConnection {
         user: String = "default",
         password: String = "",
         database: String = "default",
-        reconnectionPolicy: ReconnectionPolicy = .default
+        reconnectionPolicy: ReconnectionPolicy = .alwaysRetry
     ) throws(ClickHouseError) {
         self.host = host
         self.port = port
@@ -176,6 +141,28 @@ public final class ClickHouseConnection {
     // for draining packets until the terminator arrives.
     public func sendCancel() throws(ClickHouseError) {
         try sendAllOnce(ClickHouseQueryBuilder.buildCancel())
+    }
+
+    // Used by the per-query timeout path. Calls shutdown(SHUT_RDWR) on
+    // the live socket file descriptor from a thread other than the one
+    // running this connection's worker queue. The blocked recv()/send()
+    // on the worker returns immediately (errno or 0), the worker
+    // surfaces a typed I/O error, and the reconnect path establishes a
+    // fresh socket for the next operation.
+    //
+    // Idempotent. Safe to call from any thread. The read of
+    // `socketHandle` is a single word and races benignly with a
+    // concurrent close() — if the descriptor has just been recycled the
+    // shutdown call sees ENOTCONN and returns without affecting the
+    // unrelated FD.
+    package func shutdownSocketForTimeout() {
+        let handle = socketHandle
+        if handle < 0 { return }
+        #if canImport(Darwin)
+        _ = Darwin.shutdown(handle, SHUT_RDWR)
+        #else
+        _ = Glibc.shutdown(handle, Int32(SHUT_RDWR))
+        #endif
     }
 
     // Pulls server packets until EndOfStream. Calls `consume` for each
@@ -505,25 +492,28 @@ public final class ClickHouseConnection {
     // for the current backoff, then tries to re-establish the socket
     // and complete the handshake. Returns normally on success; throws
     // `.reconnectExhausted` if every attempt fails.
+    //
+    // `maxAttempts == ReconnectionPolicy.unboundedAttempts` (Int.max) is
+    // treated as "retry forever until the broker comes back". This is
+    // the value the always-retry default places in the policy.
     private func reconnect() throws(ClickHouseError) {
         if reconnectionPolicy.maxAttempts <= 0 {
             throw .reconnectExhausted(attempts: 0)
         }
         close()
         var backoff = reconnectionPolicy.initialBackoff
-        var lastError: ClickHouseError = .reconnectExhausted(attempts: 0)
-        for attempt in 1...reconnectionPolicy.maxAttempts {
+        var attempt = 0
+        let isUnbounded = reconnectionPolicy.maxAttempts == ReconnectionPolicy.unboundedAttempts
+        while isUnbounded || attempt < reconnectionPolicy.maxAttempts {
+            attempt += 1
             sleepFor(duration: backoff)
             do {
                 try openAndHandshake()
                 return
             } catch {
-                lastError = error
-                backoff = doubleBackoff(current: backoff, cap: reconnectionPolicy.maxBackoff)
-                if attempt == reconnectionPolicy.maxAttempts { break }
+                backoff = nextBackoff(current: backoff)
             }
         }
-        _ = lastError
         throw .reconnectExhausted(attempts: reconnectionPolicy.maxAttempts)
     }
 
@@ -535,11 +525,13 @@ public final class ClickHouseConnection {
         _ = nanosleep(&spec, &remainder)
     }
 
-    private func doubleBackoff(current: Duration, cap: Duration) -> Duration {
+    private func nextBackoff(current: Duration) -> Duration {
         let currentNs = current.components.seconds * 1_000_000_000 + current.components.attoseconds / 1_000_000_000
-        let doubled = currentNs &* 2
-        let capNs = cap.components.seconds * 1_000_000_000 + cap.components.attoseconds / 1_000_000_000
-        let clamped = doubled > capNs ? capNs : doubled
+        let multiplier = max(1.0, reconnectionPolicy.backoffMultiplier)
+        let scaled = Int64(Double(currentNs) * multiplier)
+        let capNs = reconnectionPolicy.maxBackoff.components.seconds * 1_000_000_000
+            + reconnectionPolicy.maxBackoff.components.attoseconds / 1_000_000_000
+        let clamped = scaled > capNs ? capNs : scaled
         return .nanoseconds(clamped)
     }
 
@@ -1336,17 +1328,22 @@ public final class ClickHouseConnection {
         switch error {
         case .socketIOFailed, .unexpectedEOF:
             return reconnectionPolicy.maxAttempts > 0
-        case .connectionFailed, .protocolError, .queryFailed, .reconnectExhausted, .endpointsExhausted:
+        case .connectionFailed, .protocolError, .queryFailed, .reconnectExhausted, .endpointsExhausted, .queryTimeout:
             return false
         }
+    }
+
+    private enum SendOutcome {
+        case completed
+        case failed(ClickHouseError)
     }
 
     private func sendAllOnce(_ bytes: [UInt8]) throws(ClickHouseError) {
         var offset = 0
         let handle = socketHandle
         let totalCount = bytes.count
-        let outcome: ClickHouseError? = bytes.withUnsafeBufferPointer { buffer -> ClickHouseError? in
-            guard let base = buffer.baseAddress else { return nil }
+        let outcome: SendOutcome = bytes.withUnsafeBufferPointer { buffer -> SendOutcome in
+            guard let base = buffer.baseAddress else { return .completed }
             while offset < totalCount {
                 #if canImport(Darwin)
                 let written = Darwin.send(handle, base + offset, totalCount - offset, 0)
@@ -1354,16 +1351,16 @@ public final class ClickHouseConnection {
                 let written = Glibc.send(handle, base + offset, totalCount - offset, Int32(MSG_NOSIGNAL))
                 #endif
                 if written < 0 {
-                    return .socketIOFailed(errno: errno, syscall: "send")
+                    return .failed(.socketIOFailed(errno: errno, syscall: "send"))
                 }
                 if written == 0 {
-                    return .unexpectedEOF(bytesExpected: totalCount - offset)
+                    return .failed(.unexpectedEOF(bytesExpected: totalCount - offset))
                 }
                 offset += written
             }
-            return nil
+            return .completed
         }
-        if let error = outcome { throw error }
+        if case .failed(let error) = outcome { throw error }
     }
 
     private static func openSocket(host: String, port: Int) throws(ClickHouseError) -> Int32 {
@@ -1381,10 +1378,10 @@ public final class ClickHouseConnection {
             throw .connectionFailed(reason: "DNS resolution failed: \(String(cString: gai_strerror(lookup)))")
         }
         defer { freeaddrinfo(resolved) }
-        guard let info = resolved else {
+        guard let addressInformation = resolved else {
             throw .connectionFailed(reason: "DNS resolution returned no addrinfo")
         }
-        let handle: Int32 = socket(info.pointee.ai_family, info.pointee.ai_socktype, info.pointee.ai_protocol)
+        let handle: Int32 = socket(addressInformation.pointee.ai_family, addressInformation.pointee.ai_socktype, addressInformation.pointee.ai_protocol)
         if handle < 0 {
             throw .connectionFailed(reason: "socket() failed: \(String(cString: strerror(errno)))")
         }
@@ -1394,7 +1391,7 @@ public final class ClickHouseConnection {
         setsockopt(handle, SOL_SOCKET, SO_RCVBUF, &receiveBufferBytes, socklen_t(MemoryLayout<Int32>.size))
         var sendBufferBytes: Int32 = 4 * 1024 * 1024
         setsockopt(handle, SOL_SOCKET, SO_SNDBUF, &sendBufferBytes, socklen_t(MemoryLayout<Int32>.size))
-        let connectStatus = connect(handle, info.pointee.ai_addr, info.pointee.ai_addrlen)
+        let connectStatus = connect(handle, addressInformation.pointee.ai_addr, addressInformation.pointee.ai_addrlen)
         if connectStatus != 0 {
             let detail = String(cString: strerror(errno))
             #if canImport(Darwin)

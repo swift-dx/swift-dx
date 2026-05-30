@@ -163,22 +163,26 @@ struct ClickHouseRowKeyedContainer<Key: CodingKey>: KeyedEncodingContainerProtoc
     }
 
     mutating func encodeIfPresent<T: Encodable>(_ value: T?, forKey key: Key) throws {
+        if try encodeIfDateOrUUIDOptional(value, forKey: key) { return }
+        guard let value else {
+            throw ClickHouseError.protocolError(
+                stage: "encoder.encodeIfPresent",
+                message: "column '\(key.stringValue)' has unsupported Optional Swift type \(String(describing: T.self))."
+            )
+        }
+        try encode(value, forKey: key)
+    }
+
+    private mutating func encodeIfDateOrUUIDOptional<T: Encodable>(_ value: T?, forKey key: Key) throws -> Bool {
         if T.self == Date.self {
             try storage.appendNullableDateTime(toNullable(value as? Date), forColumn: key.stringValue)
-            return
+            return true
         }
         if T.self == UUID.self {
             try storage.appendNullableUUID(toNullable(value as? UUID), forColumn: key.stringValue)
-            return
+            return true
         }
-        if let value {
-            try encode(value, forKey: key)
-            return
-        }
-        throw ClickHouseError.protocolError(
-            stage: "encoder.encodeIfPresent",
-            message: "column '\(key.stringValue)' has unsupported Optional Swift type \(String(describing: T.self))."
-        )
+        return false
     }
 
     mutating func nestedContainer<NestedKey>(keyedBy keyType: NestedKey.Type, forKey key: Key) -> KeyedEncodingContainer<NestedKey> where NestedKey: CodingKey {

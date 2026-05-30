@@ -23,11 +23,12 @@ struct ClickHouseColumnarKeyedDecodingContainer<Key: CodingKey>: KeyedDecodingCo
     }
 
     func contains(_ key: Key) -> Bool {
-        state.slot(for: key.stringValue) != nil
+        if case .found = state.slot(for: key.stringValue) { return true }
+        return false
     }
 
     func decodeNil(forKey key: Key) throws -> Bool {
-        guard let slot = state.slot(for: key.stringValue) else {
+        guard case .found(let slot) = state.slot(for: key.stringValue) else {
             throw missing(key)
         }
         return isNullAt(slot: slot)
@@ -249,7 +250,7 @@ struct ClickHouseColumnarKeyedDecodingContainer<Key: CodingKey>: KeyedDecodingCo
     }
 
     private func column(forKey key: Key) throws -> ClickHouseTypedColumn {
-        guard let slot = state.slot(for: key.stringValue) else {
+        guard case .found(let slot) = state.slot(for: key.stringValue) else {
             throw missing(key)
         }
         return state.columns[slot].column
@@ -292,7 +293,7 @@ struct ClickHouseColumnarKeyedDecodingContainer<Key: CodingKey>: KeyedDecodingCo
     }
 
     private func wrapPresent<T>(forKey key: Key, _ body: () throws -> T) throws -> T? {
-        guard let slot = state.slot(for: key.stringValue) else { return nil }
+        guard case .found(let slot) = state.slot(for: key.stringValue) else { return nil }
         if isNullAt(slot: slot) { return nil }
         return try body()
     }

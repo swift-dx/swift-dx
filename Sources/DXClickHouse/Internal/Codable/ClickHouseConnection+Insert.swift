@@ -56,36 +56,53 @@ extension ClickHouseConnection {
         var seenSample = false
         while !seenSample {
             let packetType = try readUVarIntInternal()
-            switch packetType {
-            case 1:
-                schema = try parseSampleBlockHeaderInternal()
-                seenSample = true
-            case 2:
-                let exception = try readExceptionPacketInternal()
-                throw .queryFailed(serverException: exception)
-            case 3:
-                try skipProgressPacketInternal()
-            case 6:
-                try skipProfileInfoPacketInternal()
-            case 10, 14:
-                _ = try readStringInternal()
-                try skipBlockInternal()
-            case 11:
-                _ = try readStringInternal()
-                _ = try readStringInternal()
-            case 17:
-                _ = try readStringInternal()
-            case 4:
-                continue
-            default:
-                throw .protocolError(stage: "receiveInsertSampleSchema", message: "unexpected packet type \(packetType)")
-            }
+            seenSample = try handleSampleSchemaPacket(packetType: packetType, schema: &schema)
         }
         return schema
     }
 
+    private func handleSampleSchemaPacket(
+        packetType: UInt64,
+        schema: inout [InsertSchemaColumn]
+    ) throws(ClickHouseError) -> Bool {
+        switch packetType {
+        case 1:
+            schema = try parseSampleBlockHeaderInternal()
+            return true
+        case 2:
+            throw .queryFailed(serverException: try readExceptionPacketInternal())
+        case 4:
+            return false
+        default:
+            try skipNonSchemaPacket(packetType: packetType, stage: "receiveInsertSampleSchema")
+            return false
+        }
+    }
+
+    private func skipNonSchemaPacket(packetType: UInt64, stage: String) throws(ClickHouseError) {
+        switch packetType {
+        case 3: try skipProgressPacketInternal()
+        case 6: try skipProfileInfoPacketInternal()
+        case 10, 14:
+            _ = try readStringInternal()
+            try skipBlockInternal()
+        case 11:
+            _ = try readStringInternal()
+            _ = try readStringInternal()
+        case 17:
+            _ = try readStringInternal()
+        default:
+            throw .protocolError(stage: stage, message: "unexpected packet type \(packetType)")
+        }
+    }
+
     public func sendRawBytes(_ bytes: [UInt8]) throws(ClickHouseError) {
         try sendAllWithReconnectInternal(bytes)
+    }
+
+    private enum EndOfStreamStep {
+        case keepReading
+        case finished(rows: UInt64, bytes: UInt64)
     }
 
     public func receiveEndOfStream(
@@ -95,35 +112,52 @@ extension ClickHouseConnection {
         var writtenBytes: UInt64 = 0
         while true {
             let packetType = try readUVarIntInternal()
-            switch packetType {
-            case 1, 7, 8:
-                try skipDataBlockBodyInternal()
-            case 2:
-                let exception = try readExceptionPacketInternal()
-                throw .queryFailed(serverException: exception)
-            case 3:
-                let progress = try readProgressPacketInternal()
-                onProgress(progress)
-                writtenRows = max(writtenRows, progress.writtenRows)
-                writtenBytes = max(writtenBytes, progress.writtenBytes)
-            case 5:
-                return (writtenRows, writtenBytes)
-            case 6:
-                try skipProfileInfoPacketInternal()
-            case 10, 14:
-                _ = try readStringInternal()
-                try skipBlockInternal()
-            case 11:
-                _ = try readStringInternal()
-                _ = try readStringInternal()
-            case 17:
-                _ = try readStringInternal()
-            case 4:
-                continue
-            default:
-                throw .protocolError(stage: "receiveEndOfStream", message: "unexpected packet type \(packetType)")
+            let step = try handleEndOfStreamPacket(
+                packetType: packetType,
+                writtenRows: &writtenRows,
+                writtenBytes: &writtenBytes,
+                onProgress: onProgress
+            )
+            if case .finished(let rows, let bytes) = step {
+                return (rows, bytes)
             }
         }
+    }
+
+    private func handleEndOfStreamPacket(
+        packetType: UInt64,
+        writtenRows: inout UInt64,
+        writtenBytes: inout UInt64,
+        onProgress: (ClickHouseProgress) -> Void
+    ) throws(ClickHouseError) -> EndOfStreamStep {
+        switch packetType {
+        case 1, 7, 8:
+            try skipDataBlockBodyInternal()
+            return .keepReading
+        case 2:
+            throw .queryFailed(serverException: try readExceptionPacketInternal())
+        case 3:
+            try absorbProgress(into: &writtenRows, bytes: &writtenBytes, onProgress: onProgress)
+            return .keepReading
+        case 5:
+            return .finished(rows: writtenRows, bytes: writtenBytes)
+        case 4:
+            return .keepReading
+        default:
+            try skipNonSchemaPacket(packetType: packetType, stage: "receiveEndOfStream")
+            return .keepReading
+        }
+    }
+
+    private func absorbProgress(
+        into writtenRows: inout UInt64,
+        bytes writtenBytes: inout UInt64,
+        onProgress: (ClickHouseProgress) -> Void
+    ) throws(ClickHouseError) {
+        let progress = try readProgressPacketInternal()
+        onProgress(progress)
+        writtenRows = max(writtenRows, progress.writtenRows)
+        writtenBytes = max(writtenBytes, progress.writtenBytes)
     }
 
     internal func skipDataBlockBodyInternal() throws(ClickHouseError) {

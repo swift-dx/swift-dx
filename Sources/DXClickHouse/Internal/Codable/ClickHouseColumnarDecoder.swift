@@ -64,7 +64,15 @@ final class ClickHouseColumnarDecoderState {
         self.columnIndexByName = index
     }
 
-    func slot(for key: String) -> Int? {
-        columnIndexByName[key]
+    enum SlotLookup {
+        case found(Int)
+        case missing
+    }
+
+    func slot(for key: String) -> SlotLookup {
+        if let index = columnIndexByName[key] {
+            return .found(index)
+        }
+        return .missing
     }
 }

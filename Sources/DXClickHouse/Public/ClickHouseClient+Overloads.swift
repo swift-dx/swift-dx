@@ -28,14 +28,6 @@ import Foundation
 
 extension ClickHouseClient {
 
-    public func execute(_ sql: String) async throws(ClickHouseError) {
-        try await executeAndDrain(sql: sql)
-    }
-
-    public func execute(_ sqlBytes: [UInt8]) async throws(ClickHouseError) {
-        try await executeAndDrain(sql: Self.decodeSQL(sqlBytes))
-    }
-
     public nonisolated func execute(_ sql: String, completion: @escaping DXCallback<Void, ClickHouseError>) {
         Task { [self] in
             do {
@@ -60,17 +52,6 @@ extension ClickHouseClient {
                 completion(.failure(.protocolError(stage: "ping.callback", message: "\(error)")))
             }
         }
-    }
-
-    public func ping() async throws(ClickHouseError) {
-        try await pingDrain()
-    }
-
-    public func scalar<T: Decodable & Sendable>(
-        _ sqlBytes: [UInt8],
-        as type: T.Type
-    ) async throws(ClickHouseError) -> T {
-        try await scalar(Self.decodeSQL(sqlBytes), as: type)
     }
 
     public nonisolated func scalar<T: Decodable & Sendable>(
@@ -99,24 +80,6 @@ extension ClickHouseClient {
         select(Self.decodeSQL(sqlBytes), as: type, settings: settings, parameters: parameters)
     }
 
-    public func selectAll<T: Decodable & Sendable>(
-        _ sql: String,
-        as type: T.Type,
-        settings: ClickHouseQuerySettings = .empty,
-        parameters: ClickHouseQueryParameters = .empty
-    ) async throws(ClickHouseError) -> [T] {
-        try await Self.collectRows(stream: select(sql, as: type, settings: settings, parameters: parameters))
-    }
-
-    public func selectAll<T: Decodable & Sendable>(
-        _ sqlBytes: [UInt8],
-        as type: T.Type,
-        settings: ClickHouseQuerySettings = .empty,
-        parameters: ClickHouseQueryParameters = .empty
-    ) async throws(ClickHouseError) -> [T] {
-        try await selectAll(Self.decodeSQL(sqlBytes), as: type, settings: settings, parameters: parameters)
-    }
-
     public nonisolated func select<T: Decodable & Sendable>(
         _ sql: String,
         as type: T.Type,
@@ -134,48 +97,21 @@ extension ClickHouseClient {
         }
     }
 
-    public nonisolated func stream<T: Decodable & Sendable, Handler: DXMessageHandler<T, ClickHouseError>>(
-        _ sql: String,
-        as type: T.Type,
-        handler: Handler
-    ) -> Task<Void, Never> {
-        let upstream = select(sql, as: type)
-        return Task { await Self.pumpStream(upstream: upstream, handler: handler) }
-    }
-
-    public nonisolated func stream<T: Decodable & Sendable, Handler: DXMessageHandler<T, ClickHouseError>>(
-        _ sqlBytes: [UInt8],
-        as type: T.Type,
-        handler: Handler
-    ) -> Task<Void, Never> {
-        stream(Self.decodeSQL(sqlBytes), as: type, handler: handler)
-    }
-
     public func insert<S: Sequence & Sendable>(
         into table: String,
-        rows: S
+        rows: S,
+        timeout: Duration = ClickHouseQueryDefaults.insertTimeout
     ) async throws(ClickHouseError) -> ClickHouseInsertSummary where S.Element: Encodable & Sendable {
-        try await insert(into: table, rows: Array(rows))
+        try await insert(into: table, rows: Array(rows), timeout: timeout)
     }
 
     public func insert<Source: AsyncSequence & Sendable, Row: Encodable & Sendable>(
         into table: String,
-        rows: Source
+        rows: Source,
+        timeout: Duration = ClickHouseQueryDefaults.insertTimeout
     ) async throws(ClickHouseError) -> ClickHouseInsertSummary where Source.Element == Row {
-        let collected = try await Self.materialise(rows: rows)
-        return try await insert(into: table, rows: collected)
-    }
-
-    public func insertNativeBlock(
-        into table: String,
-        columnList: String,
-        nativeBlockBytes: [UInt8]
-    ) async throws(ClickHouseError) -> ClickHouseInsertSummary {
-        try await sendPreEncodedInsert(
-            table: table,
-            columnList: columnList,
-            nativeBlockBytes: nativeBlockBytes
-        )
+        let collected: [Row] = try await Self.materialise(rows: rows)
+        return try await insert(into: table, rows: collected, timeout: timeout)
     }
 
     public nonisolated func insert<T: Encodable & Sendable>(
@@ -195,80 +131,11 @@ extension ClickHouseClient {
         }
     }
 
-    private func executeAndDrain(sql: String) async throws(ClickHouseError) {
-        try await runOnTransport { transport throws(ClickHouseError) in
-            try transport.connection.sendQuery(sql)
-            _ = try transport.connection.receiveBlocks { _, _ in }
-        }
-    }
-
-    private func pingDrain() async throws(ClickHouseError) {
-        try await runOnTransport { transport throws(ClickHouseError) in
-            try transport.connection.ping()
-        }
-    }
-
-    private func sendPreEncodedInsert(
-        table: String,
-        columnList: String,
-        nativeBlockBytes: [UInt8]
-    ) async throws(ClickHouseError) -> ClickHouseInsertSummary {
-        let terminator = ClickHouseBlockWriter.encodeEmptyDataPacket()
-        let writtenCounters = try await runOnTransportReturning { transport throws(ClickHouseError) -> (UInt64, UInt64) in
-            try transport.connection.sendQuery("INSERT INTO \(table) \(columnList) FORMAT Native")
-            _ = try transport.connection.receiveInsertSampleSchema()
-            try transport.connection.sendRawBytes(nativeBlockBytes)
-            try transport.connection.sendRawBytes(terminator)
-            return try transport.connection.receiveEndOfStream()
-        }
-        return ClickHouseInsertSummary(
-            rowsSent: 0,
-            blocksSent: 1,
-            writtenRows: writtenCounters.0,
-            writtenBytes: writtenCounters.1
-        )
-    }
-
-    private static func decodeSQL(_ bytes: [UInt8]) -> String {
+    static func decodeSQL(_ bytes: [UInt8]) -> String {
         String(decoding: bytes, as: Unicode.UTF8.self)
     }
 
-    private static func collectRows<T: Sendable>(
-        stream: AsyncThrowingStream<T, Error>
-    ) async throws(ClickHouseError) -> [T] {
-        let outcome: Result<[T], ClickHouseError> = await drainStream(stream: stream)
-        switch outcome {
-        case .success(let rows): return rows
-        case .failure(let error): throw error
-        }
-    }
-
-    private static func drainStream<T: Sendable>(
-        stream: AsyncThrowingStream<T, Error>
-    ) async -> Result<[T], ClickHouseError> {
-        do {
-            return .success(try await collectAll(stream: stream))
-        } catch {
-            return .failure(toTypedError(error: error, stage: "collectRows"))
-        }
-    }
-
-    private static func collectAll<T: Sendable>(
-        stream: AsyncThrowingStream<T, Error>
-    ) async throws -> [T] {
-        var rows: [T] = []
-        for try await row in stream { rows.append(row) }
-        return rows
-    }
-
-    private static func toTypedError(error: Error, stage: String) -> ClickHouseError {
-        switch error {
-        case let typed as ClickHouseError: return typed
-        default: return .protocolError(stage: stage, message: "\(error)")
-        }
-    }
-
-    private static func materialise<Source: AsyncSequence & Sendable, Row: Encodable & Sendable>(
+    static func materialise<Source: AsyncSequence & Sendable, Row: Encodable & Sendable>(
         rows: Source
     ) async throws(ClickHouseError) -> [Row] where Source.Element == Row {
         var collected: [Row] = []
@@ -278,33 +145,6 @@ extension ClickHouseClient {
             throw .protocolError(stage: "insert.asyncSequence", message: "\(error)")
         }
         return collected
-    }
-
-    private static func pumpStream<T: Decodable & Sendable, Handler: DXMessageHandler<T, ClickHouseError>>(
-        upstream: AsyncThrowingStream<T, Error>,
-        handler: Handler
-    ) async {
-        do {
-            try await forwardRows(upstream: upstream, handler: handler)
-        } catch {
-            await handler.receive(error: toTypedError(error: error, stage: "stream"))
-        }
-    }
-
-    private static func forwardRows<T: Decodable & Sendable, Handler: DXMessageHandler<T, ClickHouseError>>(
-        upstream: AsyncThrowingStream<T, Error>,
-        handler: Handler
-    ) async throws {
-        for try await row in upstream { await handler.receive(row) }
-    }
-
-    private func runOnTransport(
-        _ body: @escaping @Sendable (ClientTransportBox) throws(ClickHouseError) -> Void
-    ) async throws(ClickHouseError) {
-        _ = try await runOnTransportReturning { transport throws(ClickHouseError) -> Int in
-            try body(transport)
-            return 0
-        }
     }
 
     nonisolated func runOnTransportReturning<Value: Sendable>(

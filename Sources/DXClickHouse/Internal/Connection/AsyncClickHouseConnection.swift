@@ -51,33 +51,40 @@ public final actor AsyncClickHouseConnection {
         user: String = "default",
         password: String = "",
         database: String = "default",
-        reconnectionPolicy: ReconnectionPolicy = .default
-    ) async throws {
+        reconnectionPolicy: ReconnectionPolicy = .alwaysRetry
+    ) async throws(ClickHouseError) {
         let worker = DispatchQueue(label: "swift-dx.async-raw-clickhouse", qos: .userInitiated)
         self.worker = worker
-        let connection: ClickHouseConnection = try await withCheckedThrowingContinuation { continuation in
-            worker.async {
-                do {
-                    let made = try ClickHouseConnection(
-                        host: host,
-                        port: port,
-                        user: user,
-                        password: password,
-                        database: database,
-                        reconnectionPolicy: reconnectionPolicy
-                    )
-                    continuation.resume(returning: made)
-                } catch {
-                    continuation.resume(throwing: error)
+        let box: TransportBox
+        do {
+            box = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<TransportBox, Error>) in
+                worker.async {
+                    do {
+                        let made = try ClickHouseConnection(
+                            host: host,
+                            port: port,
+                            user: user,
+                            password: password,
+                            database: database,
+                            reconnectionPolicy: reconnectionPolicy
+                        )
+                        continuation.resume(returning: TransportBox(connection: made))
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
                 }
             }
+        } catch let typed as ClickHouseError {
+            throw typed
+        } catch {
+            throw ClickHouseError.protocolError(stage: "async-bridge", message: String(describing: error))
         }
-        self.transport = TransportBox(connection: connection)
+        self.transport = box
     }
 
-    public func sendQuery(_ sql: String) async throws {
+    public func sendQuery(_ sql: String) async throws(ClickHouseError) {
         let transport = self.transport
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        let _: Void = try await Self.bridgeThrowing { (continuation: CheckedContinuation<Void, Error>) in
             worker.async {
                 do {
                     try transport.connection.sendQuery(sql)
@@ -97,9 +104,9 @@ public final actor AsyncClickHouseConnection {
         queryID: String,
         settings: ClickHouseQuerySettings = .empty,
         parameters: ClickHouseQueryParameters = .empty
-    ) async throws {
+    ) async throws(ClickHouseError) {
         let transport = self.transport
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        let _: Void = try await Self.bridgeThrowing { (continuation: CheckedContinuation<Void, Error>) in
             worker.async {
                 do {
                     try transport.connection.sendQuery(
@@ -118,9 +125,9 @@ public final actor AsyncClickHouseConnection {
 
     // Round-trip Ping → Pong. Pool preflight uses this to validate a
     // recycled connection before handing it back to a caller.
-    public func ping() async throws {
+    public func ping() async throws(ClickHouseError) {
         let transport = self.transport
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        let _: Void = try await Self.bridgeThrowing { (continuation: CheckedContinuation<Void, Error>) in
             worker.async {
                 do {
                     try transport.connection.ping()
@@ -136,9 +143,9 @@ public final actor AsyncClickHouseConnection {
     // loop end-to-end. The continuation resumes exactly once when the
     // server signals EndOfStream. This is the floor-shape async surface
     // — one hop, no per-block coordination.
-    public func drainBlocks() async throws -> Int {
+    public func drainBlocks() async throws(ClickHouseError) -> Int {
         let transport = self.transport
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Int, Error>) in
+        return try await Self.bridgeThrowing { (continuation: CheckedContinuation<Int, Error>) in
             worker.async {
                 do {
                     let rows = try transport.connection.receiveBlocksDrain { _, _, _ in }
@@ -158,9 +165,9 @@ public final actor AsyncClickHouseConnection {
         onProgress: @escaping @Sendable (ClickHouseProgress) -> Void = { _ in },
         onProfileInfo: @escaping @Sendable (ClickHouseProfileInfo) -> Void = { _ in },
         onProfileEvents: @escaping @Sendable (ClickHouseProfileEvents) -> Void = { _ in }
-    ) async throws -> Int {
+    ) async throws(ClickHouseError) -> Int {
         let transport = self.transport
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Int, Error>) in
+        return try await Self.bridgeThrowing { (continuation: CheckedContinuation<Int, Error>) in
             worker.async {
                 do {
                     let callbacks = ClickHouseConnection.ReceiveCallbacks(
@@ -178,9 +185,9 @@ public final actor AsyncClickHouseConnection {
     }
 
     // Scalar UInt64 round-trip. One continuation hop per call.
-    public func receiveScalarUInt64() async throws -> UInt64 {
+    public func receiveScalarUInt64() async throws(ClickHouseError) -> UInt64 {
         let transport = self.transport
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<UInt64, Error>) in
+        return try await Self.bridgeThrowing { (continuation: CheckedContinuation<UInt64, Error>) in
             worker.async {
                 do {
                     let value = try transport.connection.receiveScalarUInt64()
@@ -197,9 +204,9 @@ public final actor AsyncClickHouseConnection {
     // The copy itself happens on the worker so the bytes survive the
     // async hop; this matches the sync `receiveBlocksExtractingStrings`
     // shape used by `select_full_scan_proj_view`.
-    public func extractStringsDrain() async throws -> (rows: Int, bytes: Int) {
+    public func extractStringsDrain() async throws(ClickHouseError) -> (rows: Int, bytes: Int) {
         let transport = self.transport
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(Int, Int), Error>) in
+        return try await Self.bridgeThrowing { (continuation: CheckedContinuation<(Int, Int), Error>) in
             worker.async {
                 do {
                     var bytes = 0
@@ -213,6 +220,25 @@ public final actor AsyncClickHouseConnection {
                     continuation.resume(throwing: error)
                 }
             }
+        }
+    }
+
+    // Bridges the untyped-throws `withCheckedThrowingContinuation` API
+    // into a typed `throws(ClickHouseError)` surface. Every continuation
+    // resume in this file forwards a `ClickHouseError` thrown by the
+    // synchronous transport; the cast cannot fail. Should it ever fail
+    // (a non-ClickHouse error escaping the transport), the catch arm
+    // wraps it as a typed protocolError so the SemVer contract holds.
+    @inline(__always)
+    private static func bridgeThrowing<T: Sendable>(
+        _ body: @Sendable (CheckedContinuation<T, Error>) -> Void
+    ) async throws(ClickHouseError) -> T {
+        do {
+            return try await withCheckedThrowingContinuation(body)
+        } catch let typed as ClickHouseError {
+            throw typed
+        } catch {
+            throw ClickHouseError.protocolError(stage: "async-bridge", message: String(describing: error))
         }
     }
 
@@ -279,4 +305,3 @@ final class TransportBox: @unchecked Sendable {
         self.connection = connection
     }
 }
-

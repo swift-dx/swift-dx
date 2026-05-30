@@ -23,7 +23,7 @@
     "DXCoreTests": "default",
     "DXJetStreamTests": "default",
     "DXJetStreamIntegration": "default",
-    "DXClickHouse": [],
+    "DXClickHouse": "default",
     "DXClickHouseTests": [],
     "DXClickHouseIntegration": [],
     "DXJSONSchema": "default",
@@ -45,6 +45,31 @@
       "path": "Tests/DXJetStreamTests/CapturingLogHandler.swift",
       "rules": ["S002"],
       "reason": "swift-log's LogHandler protocol mandates a subscript returning Logger.Metadata.Value? and a log(...) method taking metadata: Logger.Metadata?. Both Optional surfaces are required by the third-party protocol."
+    },
+    {
+      "path": "Sources/DXClickHouse/Internal/Codable/ClickHouseColumnarKeyedDecodingContainer.swift",
+      "rules": ["S002", "S007", "S011"],
+      "reason": "Foundation's KeyedDecodingContainerProtocol mandates decodeIfPresent(_:forKey:) -> T? returns for every primitive plus the generic Decodable overload. The generic decode<T: Decodable>(_ type: T.Type, forKey:) -> T overload performs runtime type-equality dispatch where 'as! T' is the only Swift surface that can convert the typed result back to the generic parameter. The dispatch switch over Swift primitive types (Bool, String, Date, UUID, 10 integer widths) gives cyclomatic complexity 15 and cannot be reduced without abandoning the Codable contract."
+    },
+    {
+      "path": "Sources/DXClickHouse/Internal/Codable/ClickHouseRowKeyedContainer.swift",
+      "rules": ["S002"],
+      "reason": "Foundation's KeyedEncodingContainerProtocol mandates encodeIfPresent(_ value: T?, forKey:) for every primitive and the generic Encodable overload. The Wrapped? parameter on the toNullable helper is the direct shape of the protocol's mandated input. These Optional surfaces are required by the third-party Codable contract."
+    },
+    {
+      "path": "Sources/DXClickHouse/Internal/Codable/ClickHouseCodableDecoder.swift",
+      "rules": ["S011"],
+      "reason": "parseNonNullColumn dispatches on the wire-format ClickHouse type-name string (server emits these as String literals, e.g. 'Int32', 'String', 'UUID'). The exhaustive switch covers 20+ ClickHouse scalar types; each branch lifts that type's bytes into the matching typed buffer. Splitting per-type into separate files would explode the codebase without improving readability."
+    },
+    {
+      "path": "Sources/DXClickHouse/Internal/Codable/ClickHouseBlockWriter.swift",
+      "rules": ["S011"],
+      "reason": "writeColumnBody dispatches on the ClickHouseTypedColumn enum (exhaustive switch over the supported wire-format types). The dispatch is an enum-exhaustive switch where each branch emits the column body for one ClickHouse type to the wire-format writer. Each branch is a small typed-write call; the file already separates wire-format helpers from the dispatcher."
+    },
+    {
+      "path": "Sources/DXClickHouse/Internal/Connection/ClickHouseConnection.swift",
+      "rules": ["S002", "S011"],
+      "reason": "POSIX socket transport for the ClickHouse Native protocol. getaddrinfo's C signature mandates inout UnsafeMutablePointer<addrinfo>? (third-party C API contract). Wire-protocol packet readers (receiveBlocks, receiveBlocksDrain, receiveBlocksExtractingStrings, drainBlockPacket, extractStringsBlockPacket, readBlockPacket, skipColumnPrefix, skipColumnBodyAfterPrefix, skipStringRows, splitMapInner, copyColumnBody, columnByteWidth, readProgressPacket, readUVarInt, skipServerHelloTail, openSocket, reconnect) are byte-level dispatch loops over ClickHouse Native packet types and column-type-name strings. Each function is already extracted to a single concern and further extraction would push the dispatch into deeper helpers without simplification."
     }
   ]
 }

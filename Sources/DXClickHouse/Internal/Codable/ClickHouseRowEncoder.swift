@@ -37,19 +37,27 @@ public final class ClickHouseRowEncoder: Sendable {
 
     public func encode<T: Encodable & Sendable>(_ rows: [T]) throws(ClickHouseError) -> [ClickHouseNamedColumn] {
         let storage = ClickHouseRowEncoderStorage()
+        try encodeAllRows(rows, into: storage)
+        return storage.materialize()
+    }
+
+    private func encodeAllRows<T: Encodable & Sendable>(_ rows: [T], into storage: ClickHouseRowEncoderStorage) throws(ClickHouseError) {
+        for row in rows {
+            try encodeOneRow(row, into: storage)
+        }
+    }
+
+    private func encodeOneRow<T: Encodable & Sendable>(_ row: T, into storage: ClickHouseRowEncoderStorage) throws(ClickHouseError) {
         do {
-            for row in rows {
-                storage.beginRow()
-                let encoder = ClickHouseRowEncoderImpl(storage: storage)
-                try row.encode(to: encoder)
-                try storage.endRow()
-            }
+            storage.beginRow()
+            let encoder = ClickHouseRowEncoderImpl(storage: storage)
+            try row.encode(to: encoder)
+            try storage.endRow()
         } catch let error as ClickHouseError {
             throw error
         } catch {
             throw .protocolError(stage: "ClickHouseRowEncoder", message: "\(error)")
         }
-        return storage.materialize()
     }
 }
 

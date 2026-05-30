@@ -9,37 +9,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-// One server-side setting override that applies for the duration of a
-// single query. Settings are stringly-typed on the wire even when they
-// map to numeric or enum types server-side; the server parses the value.
-//
-// `important` (bit 0 of the wire flags field) is the common case: the
-// server rejects the query if it does not recognise the setting name.
-// `custom` (bit 1) marks user-defined settings outside ClickHouse's
-// built-in list. `obsolete` (bit 2) marks server-deprecated settings.
-public struct ClickHouseQuerySetting: Sendable, Equatable {
-
-    public let name: String
-    public let value: String
-    public let important: Bool
-    public let custom: Bool
-    public let obsolete: Bool
-
-    public init(
-        name: String,
-        value: String,
-        important: Bool = true,
-        custom: Bool = false,
-        obsolete: Bool = false
-    ) {
-        self.name = name
-        self.value = value
-        self.important = important
-        self.custom = custom
-        self.obsolete = obsolete
-    }
-}
-
 // Ordered collection of server-side setting overrides applied to one
 // query. The wire encoding is a sequence of (name, flags, value)
 // triples terminated by an empty-name string. The collection is a value
@@ -71,17 +40,20 @@ public struct ClickHouseQuerySettings: Sendable, Equatable {
                 throw .protocolError(stage: "settings", message: "empty setting name")
             }
             ClickHouseWire.writeString(entry.name, into: &output)
-            ClickHouseWire.writeUVarInt(encodeFlags(entry), into: &output)
+            ClickHouseWire.writeUVarInt(encodeFlagsFor(entry), into: &output)
             ClickHouseWire.writeString(entry.value, into: &output)
         }
         ClickHouseWire.writeString("", into: &output)
     }
 
-    private func encodeFlags(_ entry: ClickHouseQuerySetting) -> UInt64 {
-        var flags: UInt64 = 0
-        if entry.important { flags |= Self.flagImportant }
-        if entry.custom { flags |= Self.flagCustom }
-        if entry.obsolete { flags |= Self.flagObsolete }
-        return flags
+    private func encodeFlagsFor(_ entry: ClickHouseQuerySetting) -> UInt64 {
+        let pairs: [(Bool, UInt64)] = [
+            (entry.important, Self.flagImportant),
+            (entry.custom, Self.flagCustom),
+            (entry.obsolete, Self.flagObsolete),
+        ]
+        return pairs.reduce(into: 0) { accumulator, pair in
+            if pair.0 { accumulator |= pair.1 }
+        }
     }
 }

@@ -107,36 +107,3 @@ public struct ClickHouseArena {
         head += bytes
     }
 }
-
-public final class ClickHouseStorage {
-
-    @usableFromInline
-    var base: UnsafeMutablePointer<UInt8>
-
-    @usableFromInline
-    var capacity: Int
-
-    public init(initialCapacity: Int) {
-        self.capacity = initialCapacity
-        self.base = UnsafeMutablePointer<UInt8>.allocate(capacity: initialCapacity)
-        self.base.initialize(repeating: 0, count: initialCapacity)
-    }
-
-    deinit {
-        base.deinitialize(count: capacity)
-        base.deallocate()
-    }
-
-    @inlinable
-    public func grow(toAtLeast minimum: Int) {
-        var newSize = max(capacity * 2, 64 * 1024)
-        while newSize < minimum { newSize *= 2 }
-        let replacement = UnsafeMutablePointer<UInt8>.allocate(capacity: newSize)
-        replacement.initialize(repeating: 0, count: newSize)
-        replacement.update(from: base, count: capacity)
-        base.deinitialize(count: capacity)
-        base.deallocate()
-        base = replacement
-        capacity = newSize
-    }
-}

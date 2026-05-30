@@ -82,7 +82,8 @@ let package = Package(
         ),
         .target(
             name: "DXClickHouse",
-            dependencies: ["DXCore"]
+            dependencies: ["DXCore"],
+            plugins: integrityPlugins
         ),
         .testTarget(
             name: "DXCoreTests",

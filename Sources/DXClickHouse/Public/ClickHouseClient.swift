@@ -64,6 +64,23 @@ public final actor ClickHouseClient {
         self.transport = ClientTransportBox(connection: connection)
     }
 
+    // Configuration-driven init. Both the ad-hoc `ClickHouse.connect`
+    // path and the long-running `ClickHouseService` route through this
+    // path so the on-the-wire behaviour is identical regardless of which
+    // entry point the caller picks. A single-connection client targets
+    // the first endpoint in the configuration; multi-endpoint failover
+    // is the responsibility of the pool layer.
+    public init(configuration: ClickHouseConfiguration) async throws(ClickHouseError) {
+        let endpoint = configuration.endpoints[0]
+        try await self.init(
+            host: endpoint.host,
+            port: endpoint.port,
+            user: configuration.user,
+            password: configuration.password,
+            database: configuration.database
+        )
+    }
+
     public func close() async {
         let transport = self.transport
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
@@ -113,7 +130,7 @@ public final actor ClickHouseClient {
         }
     }
 
-    public func insert<T: Encodable & Sendable>(
+    func insertCore<T: Encodable & Sendable>(
         into table: String,
         rows: [T]
     ) async throws(ClickHouseError) -> ClickHouseInsertSummary {
@@ -143,49 +160,48 @@ public final actor ClickHouseClient {
         )
     }
 
-    public func scalar<T: Decodable & Sendable>(
-        _ sql: String,
-        as type: T.Type
-    ) async throws(ClickHouseError) -> T {
-        let collected: Result<[T], ClickHouseError> = await collectScalar(sql: sql, type: T.self)
-        let rows = try collected.get()
-        guard rows.count == 1 else {
-            throw .protocolError(stage: "scalar", message: "expected exactly one row + one column, got \(rows.count) rows")
+    func insertNativeBlockCore(
+        into table: String,
+        columnList: String,
+        nativeBlockBytes: [UInt8]
+    ) async throws(ClickHouseError) -> ClickHouseInsertSummary {
+        let terminator = ClickHouseBlockWriter.encodeEmptyDataPacket()
+        let writtenCounters = try await runOnWorker { (transport: ClientTransportBox) throws(ClickHouseError) -> (UInt64, UInt64) in
+            try transport.connection.sendQuery("INSERT INTO \(table) \(columnList) FORMAT Native")
+            _ = try transport.connection.receiveInsertSampleSchema()
+            try transport.connection.sendRawBytes(nativeBlockBytes)
+            try transport.connection.sendRawBytes(terminator)
+            return try transport.connection.receiveEndOfStream()
         }
-        return rows[0]
-    }
-
-    private nonisolated func collectScalar<T: Decodable & Sendable>(
-        sql: String,
-        type: T.Type
-    ) async -> Result<[T], ClickHouseError> {
-        var collected: [T] = []
-        do {
-            for try await element in selectScalarStream(sql: sql, type: T.self) {
-                collected.append(element)
-            }
-        } catch let error as ClickHouseError {
-            return .failure(error)
-        } catch {
-            return .failure(.protocolError(stage: "scalar", message: "\(error)"))
-        }
-        return .success(collected)
+        return ClickHouseInsertSummary(
+            rowsSent: 0,
+            blocksSent: 1,
+            writtenRows: writtenCounters.0,
+            writtenBytes: writtenCounters.1
+        )
     }
 
     // Wraps SELECT in a way that synthesizes a single-key row decoder
     // for the value column. The query is expected to project exactly
     // one column, named anything; the wrapper decodes whichever column
-    // appears in the first slot.
-    private nonisolated func selectScalarStream<T: Decodable & Sendable>(
+    // appears in the first slot. Internal-only — public scalar()
+    // surfaces sit in ClickHouseClient+Timeout.swift.
+    nonisolated func selectScalarStream<T: Decodable & Sendable>(
         sql: String,
-        type: T.Type
+        type: T.Type,
+        settings: ClickHouseQuerySettings
     ) -> AsyncThrowingStream<T, Error> {
         let worker = self.worker
         let transport = self.transport
         return AsyncThrowingStream { continuation in
             worker.async {
                 do {
-                    try transport.connection.sendQuery(sql)
+                    try transport.connection.sendQuery(
+                        sql,
+                        queryID: "",
+                        settings: settings,
+                        parameters: .empty
+                    )
                     _ = try transport.connection.receiveBlocks { block, body in
                         if block.rowCount == 0 { return }
                         guard block.columnCount == 1 else {
@@ -285,12 +301,19 @@ public final actor ClickHouseClient {
             )
         }
         for (lhs, rhs) in zip(declared, sampleSchema) {
-            if lhs.name != rhs.name {
-                throw .protocolError(
-                    stage: "insert.schema",
-                    message: "column name mismatch: encoded '\(lhs.name)', server expects '\(rhs.name)'"
-                )
-            }
+            try requireColumnNamesMatch(declared: lhs, expected: rhs)
+        }
+    }
+
+    private static func requireColumnNamesMatch(
+        declared: ClickHouseNamedColumn,
+        expected: ClickHouseConnection.InsertSchemaColumn
+    ) throws(ClickHouseError) {
+        if declared.name != expected.name {
+            throw .protocolError(
+                stage: "insert.schema",
+                message: "column name mismatch: encoded '\(declared.name)', server expects '\(expected.name)'"
+            )
         }
     }
 }
