@@ -156,6 +156,7 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "Atomics", package: "swift-atomics"),
             ],
+            exclude: ["README.md"],
             plugins: integrityPlugins
         ),
         .testTarget(
