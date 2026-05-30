@@ -87,6 +87,7 @@ let package = Package(
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
             ],
+            exclude: ["README.md"],
             plugins: integrityPlugins
         ),
         .testTarget(
@@ -131,7 +132,12 @@ let package = Package(
         ),
         .testTarget(
             name: "DXClickHouseTests",
-            dependencies: ["DXClickHouse", "DXCore"]
+            dependencies: [
+                "DXClickHouse",
+                "DXCore",
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
+            ]
         ),
         .testTarget(
             name: "DXClickHouseIntegration",
