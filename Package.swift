@@ -94,7 +94,8 @@ let package = Package(
             plugins: integrityPlugins
         ),
         .target(
-            name: "DXClickHouseRaw"
+            name: "DXClickHouseRaw",
+            dependencies: ["DXCore"]
         ),
         .testTarget(
             name: "DXCoreTests",
@@ -152,11 +153,11 @@ let package = Package(
         ),
         .testTarget(
             name: "DXClickHouseRawTests",
-            dependencies: ["DXClickHouseRaw"]
+            dependencies: ["DXClickHouseRaw", "DXCore"]
         ),
         .testTarget(
             name: "DXClickHouseRawIntegration",
-            dependencies: ["DXClickHouseRaw"],
+            dependencies: ["DXClickHouseRaw", "DXCore"],
             path: "IntegrationTests/DXClickHouseRawIntegration"
         ),
         .target(
