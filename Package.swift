@@ -40,7 +40,7 @@ let package = Package(
     products: [
         .library(name: "DXCore", targets: ["DXCore"]),
         .library(name: "DXJetStream", targets: ["DXJetStream"]),
-        .library(name: "DXClickHouseRaw", targets: ["DXClickHouseRaw"]),
+        .library(name: "DXClickHouse", targets: ["DXClickHouse"]),
         .library(name: "DXRedis", targets: ["DXRedis"]),
         .library(name: "DXJSONSchema", targets: ["DXJSONSchema"]),
     ],
@@ -81,7 +81,7 @@ let package = Package(
             plugins: integrityPlugins
         ),
         .target(
-            name: "DXClickHouseRaw",
+            name: "DXClickHouse",
             dependencies: ["DXCore"]
         ),
         .testTarget(
@@ -125,13 +125,13 @@ let package = Package(
             plugins: integrityPlugins
         ),
         .testTarget(
-            name: "DXClickHouseRawTests",
-            dependencies: ["DXClickHouseRaw", "DXCore"]
+            name: "DXClickHouseTests",
+            dependencies: ["DXClickHouse", "DXCore"]
         ),
         .testTarget(
-            name: "DXClickHouseRawIntegration",
-            dependencies: ["DXClickHouseRaw", "DXCore"],
-            path: "IntegrationTests/DXClickHouseRawIntegration"
+            name: "DXClickHouseIntegration",
+            dependencies: ["DXClickHouse", "DXCore"],
+            path: "IntegrationTests/DXClickHouseIntegration"
         ),
         .target(
             name: "DXJSONSchema",

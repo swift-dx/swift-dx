@@ -23,8 +23,9 @@
     "DXCoreTests": "default",
     "DXJetStreamTests": "default",
     "DXJetStreamIntegration": "default",
-    "DXClickHouseRaw": [],
-    "DXClickHouseRawTests": [],
+    "DXClickHouse": [],
+    "DXClickHouseTests": [],
+    "DXClickHouseIntegration": [],
     "DXJSONSchema": "default",
     "DXJSONSchemaTests": "default",
     "DXJSONSchemaComplianceTests": "default"
