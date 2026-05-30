@@ -89,3 +89,14 @@ core.*
 .netrc
 *.pem
 *.key
+
+# Bench artifacts — regenerated per run, host-specific, never commit.
+Benchmarks/results/
+Benchmarks/Tooling/cpp-bench/build/
+Benchmarks/Tooling/clickhouse-cpp/
+Benchmarks/Tooling/redis-cpp/
+Benchmarks/Tooling/jsonschema-go/
+
+# Bench analysis notes — kept out-of-tree in ../_bench-notes/
+Benchmarks/*.md
+!Benchmarks/README.md
