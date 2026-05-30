@@ -18,6 +18,7 @@ let integrityEnabled = ProcessInfo.processInfo.environment["SWIFTDX_INTEGRITY"] 
 
 var packageDependencies: [Package.Dependency] = [
     .package(url: "https://github.com/apple/swift-nio.git", from: "2.100.0"),
+    .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.27.0"),
     .package(url: "https://github.com/apple/swift-atomics.git", from: "1.3.0"),
     .package(url: "https://github.com/apple/swift-crypto.git", from: "4.5.0"),
     .package(url: "https://github.com/apple/swift-log.git", from: "1.12.0"),
@@ -39,6 +40,7 @@ let package = Package(
     products: [
         .library(name: "DXCore", targets: ["DXCore"]),
         .library(name: "DXJetStream", targets: ["DXJetStream"]),
+        .library(name: "DXRedis", targets: ["DXRedis"]),
     ],
     dependencies: packageDependencies,
     targets: [
@@ -61,6 +63,21 @@ let package = Package(
             ],
             plugins: integrityPlugins
         ),
+        .target(
+            name: "DXRedis",
+            dependencies: [
+                "DXCore",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
+                .product(name: "Atomics", package: "swift-atomics"),
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
+            ],
+            exclude: ["README.md"],
+            plugins: integrityPlugins
+        ),
         .testTarget(
             name: "DXCoreTests",
             dependencies: ["DXCore"],
@@ -78,6 +95,27 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
             ],
             path: "IntegrationTests/DXJetStreamIntegration",
+            plugins: integrityPlugins
+        ),
+        .testTarget(
+            name: "DXRedisTests",
+            dependencies: [
+                "DXRedis",
+                "DXCore",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOEmbedded", package: "swift-nio"),
+            ],
+            plugins: integrityPlugins
+        ),
+        .testTarget(
+            name: "DXRedisIntegration",
+            dependencies: [
+                "DXRedis",
+                "DXCore",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+            ],
+            path: "IntegrationTests/DXRedisIntegration",
             plugins: integrityPlugins
         ),
     ],
