@@ -118,6 +118,23 @@ let package = Package(
                 ),
             ]
         ),
+        .executableTarget(
+            name: "JSONSchemaBenchmark",
+            dependencies: [
+                .product(name: "DXJSONSchema", package: "swift-dx"),
+                .product(name: "DXCore", package: "swift-dx"),
+            ],
+            path: "Sources/JSONSchema",
+            swiftSettings: [
+                .unsafeFlags(
+                    [
+                        "-enforce-exclusivity=unchecked",
+                        "-cross-module-optimization",
+                    ],
+                    .when(configuration: .release)
+                ),
+            ]
+        ),
     ],
     swiftLanguageModes: [.v6]
 )
