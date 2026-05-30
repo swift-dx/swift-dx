@@ -10,7 +10,7 @@
 #
 #===----------------------------------------------------------------------===#
 #
-# Runner for ClickHouseRawPoolBenchmark: pool throughput, single-conn
+# Runner for ClickHousePoolBenchmark: pool throughput, single-conn
 # baseline, acquire microbench, and a deadlock-stress sweep at high
 # tasks-per-connection contention. Writes per-trial logs into
 # results/raw-pool/.
@@ -19,13 +19,13 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BENCH_ROOT="$REPO_ROOT/Benchmarks"
-POOL_BIN="$BENCH_ROOT/.build/release/ClickHouseRawPoolBenchmark"
+POOL_BIN="$BENCH_ROOT/.build/release/ClickHousePoolBenchmark"
 CPP_BIN="$BENCH_ROOT/Tooling/cpp-bench/build/dx_clickhouse_cpp_bench"
 RESULTS_DIR="${RESULTS_DIR:-$BENCH_ROOT/results/raw-pool}"
 
 if [[ ! -x "$POOL_BIN" ]]; then
     echo "error: pool bench binary not found at $POOL_BIN" >&2
-    echo "       run: cd Benchmarks && swift build --product ClickHouseRawPoolBenchmark -c release" >&2
+    echo "       run: cd Benchmarks && swift build --product ClickHousePoolBenchmark -c release" >&2
     exit 1
 fi
 

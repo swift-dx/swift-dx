@@ -9,7 +9,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-import DXClickHouseRaw
+import DXClickHouse
 import Dispatch
 import Foundation
 
@@ -22,13 +22,13 @@ import Foundation
 //   F2 mid_stream_cancellation  cancel a streaming AsyncThrowingStream
 //                               mid-iteration and assert clean finish.
 //   F3 wrong_port_connect       connect to a closed port and assert
-//                               typed RawClickHouseError, not hang.
+//                               typed ClickHouseError, not hang.
 //   F4 pool_exhaustion          maxConnections=1 + tight acquireTimeout
 //                               under contention; assert typed
 //                               acquireTimedOut.
 //   F5 server_side_query_error  send a malformed SQL and assert the
 //                               server-side exception surfaces as
-//                               RawClickHouseError.queryFailed.
+//                               ClickHouseError.queryFailed.
 //   F6 mid_receive_tcp_rst      forwarder issues RST while the client
 //                               is draining a large SELECT; assert
 //                               typed error AND that the NEXT connect
@@ -68,7 +68,7 @@ enum StabilityFault {
 
     // F1: Container kill + restart. Uses sudo docker restart to bounce
     // the configured container, waits for the broker to come back, and
-    // confirms a new RawClickHouseConnection can complete a query
+    // confirms a new ClickHouseConnection can complete a query
     // afterwards. The existing connection's first send after the
     // restart MAY surface either a successful replay (the reconnect
     // logic re-handshakes inline) or a typed transient error followed
@@ -76,7 +76,7 @@ enum StabilityFault {
     // acceptable is a hang or a non-typed error.
     private static func containerKillRestart() async -> ScenarioResult {
         do {
-            let connection = try RawClickHouseConnection(
+            let connection = try ClickHouseConnection(
                 host: stabilityHost,
                 port: stabilityPort,
                 user: stabilityUser,
@@ -138,7 +138,7 @@ enum StabilityFault {
         let deadline = ContinuousClock.now.advanced(by: .nanoseconds(Int(timeoutSeconds * 1_000_000_000)))
         while ContinuousClock.now < deadline {
             do {
-                let probe = try RawClickHouseConnection(
+                let probe = try ClickHouseConnection(
                     host: stabilityHost,
                     port: stabilityPort,
                     user: stabilityUser,
@@ -163,9 +163,9 @@ enum StabilityFault {
     // wall-clock time, no fatal error, and the underlying connection
     // can be closed without hanging.
     private static func midStreamCancellation() async -> ScenarioResult {
-        let connection: AsyncRawClickHouseConnection
+        let connection: AsyncClickHouseConnection
         do {
-            connection = try await AsyncRawClickHouseConnection(
+            connection = try await AsyncClickHouseConnection(
                 host: stabilityHost, port: stabilityPort, user: stabilityUser,
                 password: stabilityPassword, database: stabilityDatabase
             )
@@ -185,7 +185,7 @@ enum StabilityFault {
                 }
                 return (observed, true)
             } catch {
-                // A typed RawClickHouseError or a CancellationError
+                // A typed ClickHouseError or a CancellationError
                 // are both acceptable terminations. An untyped Swift
                 // error from anywhere else is a bug.
                 _ = error
@@ -212,13 +212,13 @@ enum StabilityFault {
 
     // F3: Wrong-port connect. Attempt to open a connection against
     // port 65530 (almost certainly closed) and assert that the
-    // attempt fails fast with a typed RawClickHouseError, not a
+    // attempt fails fast with a typed ClickHouseError, not a
     // hang or untyped throw.
     private static func wrongPortConnect() async -> ScenarioResult {
         let connectStart = ContinuousClock.now
-        var captured: RawClickHouseError?
+        var captured: ClickHouseError?
         do {
-            let connection = try RawClickHouseConnection(
+            let connection = try ClickHouseConnection(
                 host: "127.0.0.1",
                 port: 1,
                 user: stabilityUser,
@@ -239,7 +239,7 @@ enum StabilityFault {
         // connection" are acceptable here. queryFailed / protocolError
         // would mean the test hit a different code path than intended.
         switch error {
-        case .connectionFailed, .socketIOFailed, .unexpectedEOF, .reconnectExhausted:
+        case .connectionFailed, .socketIOFailed, .unexpectedEOF, .reconnectExhausted, .endpointsExhausted:
             break
         case .protocolError, .queryFailed:
             return ScenarioResult(id: "F3_wrong_port_connect", passed: false, detail: "unexpected typed error: \(error)")
@@ -253,12 +253,12 @@ enum StabilityFault {
     // F4: Pool exhaustion. Construct a 1-slot pool with a 200ms
     // acquireTimeout. Hold the only slot in a background task running
     // a slow query, then attempt a second acquire from the foreground.
-    // The second acquire must throw RawClickHouseConnectionPool.Failure
+    // The second acquire must throw ClickHouseConnectionPool.Failure
     // .acquireTimedOut promptly.
     private static func poolExhaustion() async -> ScenarioResult {
-        let pool: RawClickHouseConnectionPool
+        let pool: ClickHouseConnectionPool
         do {
-            pool = try await RawClickHouseConnectionPool(
+            pool = try await ClickHouseConnectionPool(
                 host: stabilityHost,
                 port: stabilityPort,
                 user: stabilityUser,
@@ -292,15 +292,15 @@ enum StabilityFault {
         holderReady.wait()
 
         let acquireStart = ContinuousClock.now
-        var captured: RawClickHouseConnectionPool.Failure?
+        var captured: ClickHouseConnectionPool.Failure?
         do {
             try await pool.withConnection { _ in }
-        } catch let error as RawClickHouseConnectionPool.Failure {
+        } catch let error as ClickHouseConnectionPool.Failure {
             captured = error
         } catch {
             holderDone.wait()
             _ = holder
-            return ScenarioResult(id: "F4_pool_exhaustion", passed: false, detail: "expected RawClickHouseConnectionPool.Failure, got untyped: \(error)")
+            return ScenarioResult(id: "F4_pool_exhaustion", passed: false, detail: "expected ClickHouseConnectionPool.Failure, got untyped: \(error)")
         }
         let elapsedMicroseconds = StabilityClock.microsecondsSince(acquireStart)
         holderDone.wait()
@@ -317,19 +317,19 @@ enum StabilityFault {
                 return ScenarioResult(id: "F4_pool_exhaustion", passed: false, detail: "acquireTimedOut fired at \(elapsedMicroseconds)us; outside window 400ms..5s")
             }
             return ScenarioResult(id: "F4_pool_exhaustion", passed: true, detail: "typed acquireTimedOut after \(elapsedMicroseconds / 1_000)ms")
-        case .poolClosed, .openFailed:
+        case .poolClosed, .openFailed, .allEndpointsFailed:
             return ScenarioResult(id: "F4_pool_exhaustion", passed: false, detail: "unexpected typed failure: \(failure)")
         }
     }
 
     // F5: Server-side query error. Send malformed SQL. The server
     // returns Exception(2). The raw transport must surface this as
-    // RawClickHouseError.queryFailed, not a connection error. The
+    // ClickHouseError.queryFailed, not a connection error. The
     // connection must remain usable after the error.
     private static func serverSideQueryError() async -> ScenarioResult {
-        let connection: AsyncRawClickHouseConnection
+        let connection: AsyncClickHouseConnection
         do {
-            connection = try await AsyncRawClickHouseConnection(
+            connection = try await AsyncClickHouseConnection(
                 host: stabilityHost, port: stabilityPort, user: stabilityUser,
                 password: stabilityPassword, database: stabilityDatabase
             )
@@ -337,12 +337,12 @@ enum StabilityFault {
             return ScenarioResult(id: "F5_server_side_query_error", passed: false, detail: "connect failed: \(error)")
         }
 
-        var captured: RawClickHouseError?
+        var captured: ClickHouseError?
         var untyped: String?
         do {
             try await connection.sendQuery("SELECT not_a_real_column FROM not_a_real_table_for_stability_test")
             _ = try await connection.drainBlocks()
-        } catch let error as RawClickHouseError {
+        } catch let error as ClickHouseError {
             captured = error
         } catch {
             untyped = String(describing: error)
@@ -350,7 +350,7 @@ enum StabilityFault {
 
         if let untyped {
             await connection.close()
-            return ScenarioResult(id: "F5_server_side_query_error", passed: false, detail: "expected typed RawClickHouseError, got untyped: \(untyped)")
+            return ScenarioResult(id: "F5_server_side_query_error", passed: false, detail: "expected typed ClickHouseError, got untyped: \(untyped)")
         }
         guard let error = captured else {
             await connection.close()
@@ -380,8 +380,8 @@ enum StabilityFault {
     // F6: TCP RST mid-receive. Open a forwarder, point the SDK at it,
     // start a large SELECT, then RST both halves of the forwarder
     // partway through. The drain must surface a typed
-    // RawClickHouseError (.socketIOFailed or .unexpectedEOF), and a
-    // fresh AsyncRawClickHouseConnection against the actual upstream
+    // ClickHouseError (.socketIOFailed or .unexpectedEOF), and a
+    // fresh AsyncClickHouseConnection against the actual upstream
     // must still work afterwards.
     private static func midReceiveTcpRst() async -> ScenarioResult {
         let forwarder = StabilityResettingForwarder(upstreamHost: stabilityHost, upstreamPort: stabilityPort)
@@ -393,9 +393,9 @@ enum StabilityFault {
         }
         defer { forwarder.shutdown() }
 
-        let connection: AsyncRawClickHouseConnection
+        let connection: AsyncClickHouseConnection
         do {
-            connection = try await AsyncRawClickHouseConnection(
+            connection = try await AsyncClickHouseConnection(
                 host: "127.0.0.1", port: port,
                 user: stabilityUser, password: stabilityPassword, database: stabilityDatabase
             )
@@ -408,12 +408,12 @@ enum StabilityFault {
             forwarder.severe()
         }
 
-        var captured: RawClickHouseError?
+        var captured: ClickHouseError?
         var untyped: String?
         do {
             try await connection.sendQuery("SELECT number, toString(number) AS payload FROM numbers(5000000)")
             _ = try await connection.drainBlocks()
-        } catch let error as RawClickHouseError {
+        } catch let error as ClickHouseError {
             captured = error
         } catch {
             untyped = String(describing: error)
@@ -422,13 +422,13 @@ enum StabilityFault {
         await connection.close()
 
         if let untyped {
-            return ScenarioResult(id: "F6_mid_receive_tcp_rst", passed: false, detail: "expected typed RawClickHouseError, got untyped: \(untyped)")
+            return ScenarioResult(id: "F6_mid_receive_tcp_rst", passed: false, detail: "expected typed ClickHouseError, got untyped: \(untyped)")
         }
         guard let error = captured else {
             return ScenarioResult(id: "F6_mid_receive_tcp_rst", passed: false, detail: "drain succeeded; expected RST-induced typed error")
         }
         switch error {
-        case .socketIOFailed, .unexpectedEOF, .protocolError, .reconnectExhausted, .connectionFailed:
+        case .socketIOFailed, .unexpectedEOF, .protocolError, .reconnectExhausted, .connectionFailed, .endpointsExhausted:
             break
         case .queryFailed:
             return ScenarioResult(id: "F6_mid_receive_tcp_rst", passed: false, detail: "unexpected .queryFailed for TCP RST")
@@ -437,7 +437,7 @@ enum StabilityFault {
         // Reconnect to the real upstream and prove no socket leak / no
         // poisoned arena: a fresh connection scalar SELECT works.
         do {
-            let recovered = try await AsyncRawClickHouseConnection(
+            let recovered = try await AsyncClickHouseConnection(
                 host: stabilityHost, port: stabilityPort,
                 user: stabilityUser, password: stabilityPassword, database: stabilityDatabase
             )
@@ -460,14 +460,14 @@ enum StabilityFault {
     // the drain to RUN TO COMPLETION on the connection (the actor
     // continues on its worker thread even after the awaiter cancels).
     // The CALLING Task's await returns with the actor's normal
-    // completion or a typed RawClickHouseError. The bench asserts:
+    // completion or a typed ClickHouseError. The bench asserts:
     // the calling Task wakes up within ~30s, no untyped throw, and a
     // FRESH connection opened afterwards is usable.
     private static func midReceiveCancel() async -> ScenarioResult {
         let cancellationStart = ContinuousClock.now
         let task = Task<(typed: Bool, rows: Int, errorDescription: String), Never> {
             do {
-                let connection = try await AsyncRawClickHouseConnection(
+                let connection = try await AsyncClickHouseConnection(
                     host: stabilityHost, port: stabilityPort,
                     user: stabilityUser, password: stabilityPassword, database: stabilityDatabase
                 )
@@ -475,7 +475,7 @@ enum StabilityFault {
                 let rows = try await connection.drainBlocks()
                 await connection.close()
                 return (true, rows, "completed")
-            } catch let error as RawClickHouseError {
+            } catch let error as ClickHouseError {
                 return (true, 0, String(describing: error))
             } catch {
                 return (false, 0, String(describing: error))
@@ -492,9 +492,9 @@ enum StabilityFault {
             return ScenarioResult(id: "F7_mid_receive_cancel", passed: false, detail: "cancel did not wake calling task within 30s (\(elapsedMicroseconds)us)")
         }
 
-        // Recovery probe: fresh AsyncRawClickHouseConnection works.
+        // Recovery probe: fresh AsyncClickHouseConnection works.
         do {
-            let probe = try await AsyncRawClickHouseConnection(
+            let probe = try await AsyncClickHouseConnection(
                 host: stabilityHost, port: stabilityPort,
                 user: stabilityUser, password: stabilityPassword, database: stabilityDatabase
             )

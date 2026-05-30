@@ -9,12 +9,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-import DXClickHouseRaw
+import DXClickHouse
 import Foundation
 
 // Connection-pool benchmark binary. Drives the
-// RawClickHouseConnectionPool with N concurrent tasks against a
-// bounded-size pool of AsyncRawClickHouseConnection workers, and
+// ClickHouseConnectionPool with N concurrent tasks against a
+// bounded-size pool of AsyncClickHouseConnection workers, and
 // reports throughput + latency percentiles.
 //
 // Modes:
@@ -172,7 +172,7 @@ private func insertSqlForTask(_ taskIndex: Int, runTag: Int) -> String {
     "INSERT INTO \(insertTable) (run_tag, task_index, payload) VALUES (\(runTag), \(taskIndex), 'concurrent-pool-insert')"
 }
 
-private func ensureInsertTable(connection: AsyncRawClickHouseConnection) async throws {
+private func ensureInsertTable(connection: AsyncClickHouseConnection) async throws {
     try await connection.sendQuery("CREATE DATABASE IF NOT EXISTS test")
     _ = try await connection.drainBlocks()
     try await connection.sendQuery("""
@@ -186,7 +186,7 @@ private func ensureInsertTable(connection: AsyncRawClickHouseConnection) async t
     _ = try await connection.drainBlocks()
 }
 
-private func runAcquireOverhead(pool: RawClickHouseConnectionPool) async throws {
+private func runAcquireOverhead(pool: ClickHouseConnectionPool) async throws {
     // Warm-up: prime every connection in the pool so subsequent
     // iterations are all idle-stack hits.
     try await withThrowingTaskGroup(of: Void.self) { group in
@@ -213,7 +213,7 @@ private func runAcquireOverhead(pool: RawClickHouseConnectionPool) async throws 
     reportAcquireOverhead(iterations: acquireMicrobenchIterations, totalSeconds: totalSeconds, samplesNanoseconds: samples)
 }
 
-private func runConcurrentSelect(pool: RawClickHouseConnectionPool, tasks: Int) async throws {
+private func runConcurrentSelect(pool: ClickHouseConnectionPool, tasks: Int) async throws {
     let samples = SampleSink(capacity: tasks)
     let totalStart = ContinuousClock.now
     try await withThrowingTaskGroup(of: Void.self) { group in
@@ -235,7 +235,7 @@ private func runConcurrentSelect(pool: RawClickHouseConnectionPool, tasks: Int) 
     reportThroughput(mode: "concurrent_select_raw_pool", tasks: tasks, totalSeconds: totalSeconds, samples: collected, extra: "pool_max=\(poolMaxConnections)")
 }
 
-private func runSingleSelectBaseline(connection: AsyncRawClickHouseConnection, tasks: Int) async throws {
+private func runSingleSelectBaseline(connection: AsyncClickHouseConnection, tasks: Int) async throws {
     var samples = [Int64](repeating: 0, count: tasks)
     let totalStart = ContinuousClock.now
     for index in 0..<tasks {
@@ -248,7 +248,7 @@ private func runSingleSelectBaseline(connection: AsyncRawClickHouseConnection, t
     reportThroughput(mode: "single_select_raw_async", tasks: tasks, totalSeconds: totalSeconds, samples: samples, extra: "pool_max=1")
 }
 
-private func runConcurrentInsert(pool: RawClickHouseConnectionPool, tasks: Int) async throws {
+private func runConcurrentInsert(pool: ClickHouseConnectionPool, tasks: Int) async throws {
     let runTag = Int(Date().timeIntervalSince1970)
     try await pool.withConnection { connection in
         try await ensureInsertTable(connection: connection)
@@ -274,7 +274,7 @@ private func runConcurrentInsert(pool: RawClickHouseConnectionPool, tasks: Int) 
     reportThroughput(mode: "concurrent_insert_raw_pool", tasks: tasks, totalSeconds: totalSeconds, samples: collected, extra: "pool_max=\(poolMaxConnections) run_tag=\(runTag)")
 }
 
-private func runSingleInsertBaseline(connection: AsyncRawClickHouseConnection, tasks: Int) async throws {
+private func runSingleInsertBaseline(connection: AsyncClickHouseConnection, tasks: Int) async throws {
     let runTag = Int(Date().timeIntervalSince1970) &+ 1
     try await ensureInsertTable(connection: connection)
     var samples = [Int64](repeating: 0, count: tasks)
@@ -304,9 +304,9 @@ private actor SampleSink {
 struct PoolBench {
 
     static func main() async {
-        let pool: RawClickHouseConnectionPool
+        let pool: ClickHouseConnectionPool
         do {
-            pool = try await RawClickHouseConnectionPool(
+            pool = try await ClickHouseConnectionPool(
                 host: host,
                 port: port,
                 user: user,
@@ -319,9 +319,9 @@ struct PoolBench {
             print("[CH PERF RAW-POOL] FATAL pool init host=\(host) port=\(port) error=\(error)")
             exit(1)
         }
-        let singleConnection: AsyncRawClickHouseConnection
+        let singleConnection: AsyncClickHouseConnection
         do {
-            singleConnection = try await AsyncRawClickHouseConnection(
+            singleConnection = try await AsyncClickHouseConnection(
                 host: host, port: port, user: user, password: password, database: database
             )
         } catch {

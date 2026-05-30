@@ -9,14 +9,14 @@
 //
 //===----------------------------------------------------------------------===//
 
-import DXClickHouseRaw
+import DXClickHouse
 import Foundation
 
 // Async-wrapped raw-transport benchmark. Mirrors the SQL surface and
-// mode list of ClickHouseRawBenchmark but drives every query through
-// `AsyncRawClickHouseConnection`. The point is to measure the per-mode
+// mode list of ClickHouseBenchmark but drives every query through
+// `AsyncClickHouseConnection`. The point is to measure the per-mode
 // cost of the async/await + DispatchQueue + CheckedContinuation
-// wrapper relative to the synchronous RawClickHouseConnection floor.
+// wrapper relative to the synchronous ClickHouseConnection floor.
 //
 // Output is namespaced `[CH PERF RAW-ASYNC]` so a CI parser can compare
 // it directly against `[CH PERF RAW]` (sync raw) and `[CH PERF CPP]`
@@ -104,7 +104,7 @@ private func percentile(_ sortedSamples: [Int64], _ fraction: Double) -> Int64 {
 
 private struct AsyncBenchmarkRunner {
 
-    let connection: AsyncRawClickHouseConnection
+    let connection: AsyncClickHouseConnection
 
     // Drain wrapper: send + drainBlocks() in a single round-trip. The
     // drainBlocks() path is the cheapest async surface (one continuation
@@ -329,12 +329,12 @@ private func reportInsertSkip(_ mode: String) {
 }
 
 @main
-struct AsyncRawBench {
+struct AsyncBench {
 
     static func main() async {
-        let connection: AsyncRawClickHouseConnection
+        let connection: AsyncClickHouseConnection
         do {
-            connection = try await AsyncRawClickHouseConnection(host: host, port: port, user: user, password: password, database: database)
+            connection = try await AsyncClickHouseConnection(host: host, port: port, user: user, password: password, database: database)
         } catch {
             print("[CH PERF RAW-ASYNC] FATAL connect host=\(host) port=\(port) error=\(error)")
             exit(1)

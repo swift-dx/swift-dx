@@ -9,10 +9,10 @@
 //
 //===----------------------------------------------------------------------===//
 
-import DXClickHouseRaw
+import DXClickHouse
 import Foundation
 
-// Stability suite for the DXClickHouseRaw transport. Runs three
+// Stability suite for the DXClickHouse transport. Runs three
 // independent phases against a live ClickHouse instance:
 //
 //   * soak           — 13 read/scalar modes mixed at random for the

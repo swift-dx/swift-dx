@@ -9,11 +9,11 @@
 //
 //===----------------------------------------------------------------------===//
 
-import DXClickHouseRaw
+import DXClickHouse
 import Foundation
 
 // Concurrency-stress phase. N tasks share one
-// RawClickHouseConnectionPool and pick a random one of four query
+// ClickHouseConnectionPool and pick a random one of four query
 // shapes per iteration for the configured duration. Asserts at the
 // end:
 //
@@ -38,9 +38,9 @@ enum StabilityConcurrency {
     static func run() async {
         print("[STAB CONC] starting duration=\(stabilityConcurrencyDuration)s tasks=\(stabilityConcurrencyTasks)")
 
-        let pool: RawClickHouseConnectionPool
+        let pool: ClickHouseConnectionPool
         do {
-            pool = try await RawClickHouseConnectionPool(
+            pool = try await ClickHouseConnectionPool(
                 host: stabilityHost,
                 port: stabilityPort,
                 user: stabilityUser,
@@ -189,7 +189,7 @@ enum StabilityConcurrency {
 
     private static func runTask(
         taskIndex: Int,
-        pool: RawClickHouseConnectionPool,
+        pool: ClickHouseConnectionPool,
         deadline: ContinuousClock.Instant,
         runTag: Int,
         insertTable: String

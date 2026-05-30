@@ -11,16 +11,16 @@
 #===----------------------------------------------------------------------===#
 #
 # Hyperfine driver for async-raw vs sync-raw vs C++. Runs every mode
-# exposed by ClickHouseRawAsyncBenchmark side-by-side with the matching
-# mode in ClickHouseRawBenchmark and dx_clickhouse_cpp_bench. Produces
+# exposed by ClickHouseAsyncBenchmark side-by-side with the matching
+# mode in ClickHouseBenchmark and dx_clickhouse_cpp_bench. Produces
 # per-mode JSON in results/raw-async/.
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BENCH_ROOT="$REPO_ROOT/Benchmarks"
-RAW_BIN="$BENCH_ROOT/.build/release/ClickHouseRawBenchmark"
-ASYNC_BIN="$BENCH_ROOT/.build/release/ClickHouseRawAsyncBenchmark"
+RAW_BIN="$BENCH_ROOT/.build/release/ClickHouseBenchmark"
+ASYNC_BIN="$BENCH_ROOT/.build/release/ClickHouseAsyncBenchmark"
 CPP_BIN="$BENCH_ROOT/Tooling/cpp-bench/build/dx_clickhouse_cpp_bench"
 RESULTS_DIR="${RESULTS_DIR:-$BENCH_ROOT/results/raw-async}"
 

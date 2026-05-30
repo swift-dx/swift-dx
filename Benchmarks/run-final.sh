@@ -11,7 +11,7 @@
 #===----------------------------------------------------------------------===#
 #
 # Hyperfine driver for the final raw-floor vs C++ measurement. Runs every
-# mode exposed by the ClickHouseRawBenchmark binary side-by-side with the
+# mode exposed by the ClickHouseBenchmark binary side-by-side with the
 # matching mode in dx_clickhouse_cpp_bench. Five timing runs + two warmup
 # runs per mode. Writes per-mode JSON to results/raw-final/.
 #
@@ -24,7 +24,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BENCH_ROOT="$REPO_ROOT/Benchmarks"
-RAW_BIN="$BENCH_ROOT/.build/release/ClickHouseRawBenchmark"
+RAW_BIN="$BENCH_ROOT/.build/release/ClickHouseBenchmark"
 CPP_BIN="$BENCH_ROOT/Tooling/cpp-bench/build/dx_clickhouse_cpp_bench"
 RESULTS_DIR="${RESULTS_DIR:-$BENCH_ROOT/results/raw-final}"
 

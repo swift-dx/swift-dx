@@ -9,10 +9,10 @@
 //
 //===----------------------------------------------------------------------===//
 
-import DXClickHouseRaw
+import DXClickHouse
 import Foundation
 
-// Soak phase. One AsyncRawClickHouseConnection drives a 13-mode round
+// Soak phase. One AsyncClickHouseConnection drives a 13-mode round
 // robin against bench_sample.events_NM and bench_ledgers.ledger_NM
 // for the configured duration. The selection is RNG-driven so the
 // run is reproducible and balanced — every mode runs roughly the same
@@ -70,9 +70,9 @@ enum StabilitySoak {
     static func run() async {
         print("[STAB SOAK] starting duration=\(stabilitySoakDuration)s modes=13 target=\(stabilityRealEventsTable),\(stabilityLedgerTable)")
 
-        let connection: AsyncRawClickHouseConnection
+        let connection: AsyncClickHouseConnection
         do {
-            connection = try await AsyncRawClickHouseConnection(
+            connection = try await AsyncClickHouseConnection(
                 host: stabilityHost,
                 port: stabilityPort,
                 user: stabilityUser,
@@ -170,7 +170,7 @@ enum StabilitySoak {
         print("[STAB SOAK] result=\(passed ? "PASS" : "FAIL")")
     }
 
-    private static func runMode(_ mode: Mode, connection: AsyncRawClickHouseConnection, rng: inout StabilityRNG) async throws {
+    private static func runMode(_ mode: Mode, connection: AsyncClickHouseConnection, rng: inout StabilityRNG) async throws {
         switch mode {
         case .eventsScalarCount:
             try await connection.sendQuery("SELECT toInt64(count()) FROM \(stabilityRealEventsTable) WHERE event_type = 'click'")

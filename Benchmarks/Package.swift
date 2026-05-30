@@ -54,11 +54,11 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "ClickHouseRawAsyncBenchmark",
+            name: "ClickHouseAsyncBenchmark",
             dependencies: [
                 .product(name: "DXClickHouse", package: "swift-dx"),
             ],
-            path: "Sources/ClickHouseRawAsync",
+            path: "Sources/ClickHouseAsync",
             swiftSettings: [
                 .unsafeFlags(
                     [
@@ -70,11 +70,11 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "ClickHouseRawPoolBenchmark",
+            name: "ClickHousePoolBenchmark",
             dependencies: [
                 .product(name: "DXClickHouse", package: "swift-dx"),
             ],
-            path: "Sources/ClickHouseRawPool",
+            path: "Sources/ClickHousePool",
             swiftSettings: [
                 .unsafeFlags(
                     [
@@ -86,11 +86,11 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "ClickHouseRawStability",
+            name: "ClickHouseStabilityBenchmark",
             dependencies: [
                 .product(name: "DXClickHouse", package: "swift-dx"),
             ],
-            path: "Sources/ClickHouseRawStability",
+            path: "Sources/ClickHouseStability",
             swiftSettings: [
                 .unsafeFlags(
                     [
