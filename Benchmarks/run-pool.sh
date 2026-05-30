@@ -26,7 +26,6 @@ BENCH_VENDOR_DIR="${BENCH_VENDOR_DIR:-$BENCH_CACHE_ROOT/vendor}"
 BENCH_BUILD_DIR="${BENCH_BUILD_DIR:-$BENCH_CACHE_ROOT/build}"
 
 POOL_BIN="$BENCH_ROOT/.build/release/ClickHousePoolBenchmark"
-CPP_BIN="${CPP_BIN:-$BENCH_BUILD_DIR/cpp-bench/dx_clickhouse_cpp_bench}"
 RESULTS_DIR="${RESULTS_DIR:-$BENCH_RESULTS_DIR/raw-pool}"
 
 if [[ ! -x "$POOL_BIN" ]]; then
@@ -67,11 +66,5 @@ for trial in $(seq 1 5); do
     CH_BENCH_POOL_TASKS=500 CH_BENCH_POOL_MAX=4 CH_BENCH_MODES=concurrent_select_raw_pool \
         "$POOL_BIN" 2>&1 | tee "$RESULTS_DIR/stress-trial-${trial}.log" | grep -E '(concurrent_select|final_stats|OK no|FAIL)'
 done
-
-if [[ -x "$CPP_BIN" ]]; then
-    echo ">>> C++ single-thread reference (100 sequential point lookups)"
-    CH_BENCH_LEDGER_POINT_ITERATIONS=100 CH_BENCH_MODES=ledger_point_lookup_by_id \
-        "$CPP_BIN" 2>&1 | tee "$RESULTS_DIR/cpp-reference.log"
-fi
 
 echo ">>> done. results in $RESULTS_DIR"

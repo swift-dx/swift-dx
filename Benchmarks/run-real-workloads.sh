@@ -11,12 +11,10 @@
 #===----------------------------------------------------------------------===#
 #
 # Drives the real-workload SELECT modes against the Swift (DXClickHouse)
-# and C++ (clickhouse-cpp) benchmark binaries under hyperfine so each mode
-# gets statistical confidence (median + 95% CI). The fixture
-# (events_NN, logs_NN MergeTree tables) is created ONCE at the top of the
-# run and reused by every Swift and C++ invocation thereafter; that way
-# both clients query identical data and any rate delta comes from the
-# client, not from the fixture.
+# benchmark binary under hyperfine so each mode gets statistical
+# confidence (median + 95% CI). The fixture (events_NN, logs_NN
+# MergeTree tables) is created ONCE at the top of the run and reused by
+# every invocation thereafter.
 #
 # Usage:
 #   ./run-real-workloads.sh                # generic real-workload modes, 10M/1M fixture
@@ -30,10 +28,9 @@
 #
 # Outputs:
 #   results/real-workloads/<mode>-swift.json
-#   results/real-workloads/<mode>-cpp.json
-#   results/real-workloads/<mode>-compare.json   (hyperfine native comparison)
+#   results/real-workloads/<mode>-compare.json   (hyperfine native output)
 #
-# Environment variables forwarded to both binaries:
+# Environment variables forwarded to the bench binary:
 #   CH_BENCH_HOST, CH_BENCH_PORT, CH_BENCH_USER, CH_BENCH_PASSWORD
 #   CH_BENCH_EVENTS_ROWS, CH_BENCH_LOGS_ROWS, CH_BENCH_FIXTURE_BLOCK
 #   CH_BENCH_SAMPLE_DATABASE, CH_BENCH_SAMPLE_DECODE_ITERATIONS
@@ -54,7 +51,6 @@ BENCH_VENDOR_DIR="${BENCH_VENDOR_DIR:-$BENCH_CACHE_ROOT/vendor}"
 BENCH_BUILD_DIR="${BENCH_BUILD_DIR:-$BENCH_CACHE_ROOT/build}"
 
 SWIFT_BIN="$BENCH_ROOT/.build/release/ClickHouseBenchmark"
-CPP_BIN="${CPP_BIN:-$BENCH_BUILD_DIR/cpp-bench/dx_clickhouse_cpp_bench}"
 RESULTS_DIR="${RESULTS_DIR:-$BENCH_RESULTS_DIR/real-workloads}"
 
 WARMUP="${CH_BENCH_HYPERFINE_WARMUP:-2}"
@@ -76,11 +72,6 @@ done
 if [[ ! -x "$SWIFT_BIN" ]]; then
     echo "error: Swift bench binary not found at $SWIFT_BIN" >&2
     echo "       run: (cd Benchmarks && swift build -c release --product ClickHouseBenchmark)" >&2
-    exit 1
-fi
-if [[ ! -x "$CPP_BIN" ]]; then
-    echo "error: C++ bench binary not found at $CPP_BIN" >&2
-    echo "       build it under \$BENCH_BUILD_DIR/cpp-bench (default: $BENCH_BUILD_DIR/cpp-bench)" >&2
     exit 1
 fi
 if ! command -v hyperfine >/dev/null 2>&1; then
@@ -124,8 +115,7 @@ else
 fi
 
 # One-shot fixture setup via the Swift harness (drops+recreates the
-# database, so both clients see the same bytes). C++ benchsetup is
-# functionally equivalent — pick one to avoid fighting over the schema.
+# database).
 echo ">>> creating $SETUP_LABEL (this overwrites the configured database)"
 CH_BENCH_MODES="$SETUP_MODE" "$SWIFT_BIN" \
     > "$RESULTS_DIR/$SETUP_MODE.log" 2>&1
@@ -139,17 +129,13 @@ for mode in "${MODES[@]}"; do
         --export-json "$RESULTS_DIR/${mode}-compare.json" \
         --command-name "swift:$mode" \
         "env CH_BENCH_MODES=$mode '$SWIFT_BIN'" \
-        --command-name "cpp:$mode" \
-        "env CH_BENCH_MODES=$mode '$CPP_BIN'" \
         || true
 
-    # Per-binary single-shot run for the latency / first-byte / decode
-    # numbers (hyperfine only reports the wall-clock; the [CH PERF *]
-    # lines carry the structured detail).
+    # Single-shot run for the latency / first-byte / decode numbers
+    # (hyperfine only reports the wall-clock; the [CH PERF *] lines
+    # carry the structured detail).
     env CH_BENCH_MODES="$mode" "$SWIFT_BIN" \
         > "$RESULTS_DIR/${mode}-swift.log" 2>&1 || true
-    env CH_BENCH_MODES="$mode" "$CPP_BIN" \
-        > "$RESULTS_DIR/${mode}-cpp.log" 2>&1 || true
 done
 
 echo ">>> summary (median + 95% CI from hyperfine)"

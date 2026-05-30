@@ -20,8 +20,7 @@ import Foundation
 // to ClickHouse with zero abstractions in the way.
 //
 // Output is namespaced `[CH PERF RAW]` so a CI parser can compare it
-// directly against `[CH PERF SWIFT]` (DXClickHouse) and
-// `[CH PERF CPP]` (clickhouse-cpp) outputs.
+// directly against `[CH PERF SWIFT]` (DXClickHouse) output.
 //
 // Modes accepted via CH_BENCH_MODES (comma-separated). Insert modes
 // that require client-side block encoding (ledger_bulk_insert,

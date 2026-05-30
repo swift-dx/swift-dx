@@ -19,8 +19,7 @@ import Foundation
 // wrapper relative to the synchronous ClickHouseConnection floor.
 //
 // Output is namespaced `[CH PERF RAW-ASYNC]` so a CI parser can compare
-// it directly against `[CH PERF RAW]` (sync raw) and `[CH PERF CPP]`
-// (clickhouse-cpp).
+// it directly against `[CH PERF RAW]` (sync raw).
 
 private func env(_ key: String) -> String? {
     ProcessInfo.processInfo.environment[key].flatMap { $0.isEmpty ? nil : $0 }
