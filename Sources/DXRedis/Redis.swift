@@ -26,6 +26,7 @@
 /// - ``RedisScripting`` — raw commands, pipelines, Lua (`EVAL`), and array replies
 /// - ``RedisLocking`` — advisory distributed locks
 /// - ``RedisAdmin`` — database selection, flush, pool warm-up and stats, ping, shutdown
+/// - ``RedisSubscriber`` — publish, and channel/pattern subscriptions with auto-reconnect
 ///
 /// There are three ways in, for three situations.
 ///

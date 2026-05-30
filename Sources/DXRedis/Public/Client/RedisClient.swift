@@ -10,27 +10,38 @@
 //===----------------------------------------------------------------------===//
 
 import Logging
+import NIOConcurrencyHelpers
 
 // Long-lived Redis client backed by a pool of pipelining connections. One
 // instance per (server, credentials, database) is the intended pattern; reuse
 // it across the service lifetime rather than constructing one per request.
 // `Sendable` is compiler-derived: every stored property is itself Sendable and
-// all mutable state lives behind the connection pool actor.
+// all mutable state lives behind the connection pool actor or a lock-guarded box.
 //
 // The client conforms to ServiceLifecycle's `Service` (see RedisClient+Service)
 // so it can run inside a `ServiceGroup`; `run()` awaits graceful shutdown and
 // then tears the pool down. The `deinit` fires a best-effort shutdown for
-// callers that drop the client without calling `shutdown()` explicitly.
+// callers that drop the client without calling `shutdown()` explicitly. The
+// subscription manager is created lazily on first subscribe.
 public final class RedisClient: Sendable {
 
+    enum SubscriptionManagerSlot {
+
+        case none
+        case created(RedisSubscriptionManager)
+    }
+
     let pool: RedisConnectionPool
+    let poolConfiguration: RedisConnectionPool.Configuration
     let defaultDatabase: RedisDatabaseIndex
     let maxConnections: Int
     let resilience: RedisResilience
     let logger: Logger
+    let subscriptions = NIOLockedValueBox(SubscriptionManagerSlot.none)
 
     init(poolConfiguration: RedisConnectionPool.Configuration, defaultDatabase: RedisDatabaseIndex, maxConnections: Int, resilience: RedisResilience, logger: Logger) {
         self.pool = RedisConnectionPool(configuration: poolConfiguration)
+        self.poolConfiguration = poolConfiguration
         self.defaultDatabase = defaultDatabase
         self.maxConnections = maxConnections
         self.resilience = resilience
@@ -62,6 +73,9 @@ public final class RedisClient: Sendable {
     }
 
     public func shutdown() async {
+        if case .created(let manager) = subscriptions.withLockedValue({ $0 }) {
+            await manager.shutdown()
+        }
         await pool.shutdown()
     }
 
@@ -91,6 +105,10 @@ public final class RedisClient: Sendable {
 
     deinit {
         let pool = self.pool
-        Task { await pool.shutdown() }
+        let slot = subscriptions.withLockedValue { $0 }
+        Task {
+            if case .created(let manager) = slot { await manager.shutdown() }
+            await pool.shutdown()
+        }
     }
 }

@@ -114,6 +114,7 @@ when a type needs only a narrow slice.
 | `RedisScripting` | raw commands, pipelines, Lua (`EVAL`/`EVALSHA`), array replies |
 | `RedisLocking` | advisory distributed locks |
 | `RedisAdmin` | database selection, flush, pool warm-up and stats, ping, shutdown |
+| `RedisSubscriber` | publish, and channel/pattern subscriptions that re-subscribe across reconnects |
 
 ## Working with values
 
@@ -165,6 +166,37 @@ let digest = try await redis.send(RedisCommand("SCRIPT", "LOAD", script)).string
 `RedisReplyArray` is lazy: elements are materialized on access (`count`,
 `stringLookup(at:)`, `integerValue(at:)`, `nestedArray(at:)`), so partial and
 containment reads do not pay for the whole reply.
+
+## Publish/subscribe
+
+Publishing goes over the pooled request path. Subscribing runs on a separate
+connection held in subscribe mode: `subscribe` returns immediately and delivers
+through an async handler that is also given the channel each message arrived on.
+The payload is a `RedisMessage`, readable in the same forms as a `GET` —
+`bytes()`, `string()`, `buffer`, or `decode(as:)`.
+
+```swift
+let subscription = try await redis.subscribe(to: "orders") { channel, message in
+    let order = try message.decode(as: Order.self)
+    handle(order, from: channel)
+}
+
+// glob patterns; the matched concrete channel is delivered alongside the pattern
+let watch = try await redis.subscribe(toPattern: "cache.*") { pattern, channel, message in
+    invalidate(channel.name)
+}
+
+let receivers = try await redis.publish(to: "orders", json: order)   // also payload: / message:
+
+subscription.cancel()   // stops delivery and unsubscribes
+```
+
+A subscription re-subscribes automatically after a connection drop and lasts
+until it is cancelled; dropping the handle does not unsubscribe. Delivery is
+ordered per subscription and non-blocking: a slow handler backs up only its own
+bounded buffer, and overflow is dropped and counted rather than grown without
+bound. Redis pub/sub is at-most-once — messages published while the subscriber is
+disconnected are not replayed.
 
 ## Resilience
 
@@ -224,9 +256,9 @@ Redis 8.8.0, 1,000,000 distinct keys, 16-byte values, repeated-run medians
 - **RESP2 only.** RESP3 types and client-side caching (`CLIENT TRACKING`
   invalidation) are not implemented. All RESP2 reply shapes — including every
   shape `EVAL` returns — decode.
-- **Storage-focused.** There is no high-level pub/sub or streams *consumer* API.
-  The underlying commands are reachable through `send`/`sendArray`, but the
-  ergonomic surface targets key/value, scripting, locking, and administration.
+- **No streams consumer API.** There is no high-level Streams (`XADD`/`XREADGROUP`)
+  consumer surface; those commands are reachable through `send`/`sendArray`. The
+  typed surface targets key/value, scripting, locking, administration, and pub/sub.
 - **Single endpoint or static endpoint list.** There is no Redis Cluster slot
   routing; an endpoint list provides connect-time failover, not sharding.
 - **Lua via the raw command path.** `EVAL`/`EVALSHA` work through
