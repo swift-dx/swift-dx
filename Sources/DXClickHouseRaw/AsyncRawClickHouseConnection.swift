@@ -50,7 +50,8 @@ public final actor AsyncRawClickHouseConnection {
         port: Int,
         user: String = "default",
         password: String = "",
-        database: String = "default"
+        database: String = "default",
+        reconnectionPolicy: ReconnectionPolicy = .default
     ) async throws {
         let worker = DispatchQueue(label: "swift-dx.async-raw-clickhouse", qos: .userInitiated)
         self.worker = worker
@@ -62,7 +63,8 @@ public final actor AsyncRawClickHouseConnection {
                         port: port,
                         user: user,
                         password: password,
-                        database: database
+                        database: database,
+                        reconnectionPolicy: reconnectionPolicy
                     )
                     continuation.resume(returning: made)
                 } catch {
