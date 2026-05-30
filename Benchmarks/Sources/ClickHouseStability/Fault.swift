@@ -241,7 +241,7 @@ enum StabilityFault {
         switch error {
         case .connectionFailed, .socketIOFailed, .unexpectedEOF, .reconnectExhausted, .endpointsExhausted:
             break
-        case .protocolError, .queryFailed:
+        case .protocolError, .queryFailed, .queryTimeout:
             return ScenarioResult(id: "F3_wrong_port_connect", passed: false, detail: "unexpected typed error: \(error)")
         }
         if elapsedMicroseconds > 5_000_000 {
@@ -338,20 +338,13 @@ enum StabilityFault {
         }
 
         var captured: ClickHouseError?
-        var untyped: String?
         do {
             try await connection.sendQuery("SELECT not_a_real_column FROM not_a_real_table_for_stability_test")
             _ = try await connection.drainBlocks()
-        } catch let error as ClickHouseError {
-            captured = error
         } catch {
-            untyped = String(describing: error)
+            captured = error
         }
 
-        if let untyped {
-            await connection.close()
-            return ScenarioResult(id: "F5_server_side_query_error", passed: false, detail: "expected typed ClickHouseError, got untyped: \(untyped)")
-        }
         guard let error = captured else {
             await connection.close()
             return ScenarioResult(id: "F5_server_side_query_error", passed: false, detail: "malformed SQL succeeded; expected queryFailed")
@@ -409,21 +402,15 @@ enum StabilityFault {
         }
 
         var captured: ClickHouseError?
-        var untyped: String?
         do {
             try await connection.sendQuery("SELECT number, toString(number) AS payload FROM numbers(5000000)")
             _ = try await connection.drainBlocks()
-        } catch let error as ClickHouseError {
-            captured = error
         } catch {
-            untyped = String(describing: error)
+            captured = error
         }
         _ = await resetter.value
         await connection.close()
 
-        if let untyped {
-            return ScenarioResult(id: "F6_mid_receive_tcp_rst", passed: false, detail: "expected typed ClickHouseError, got untyped: \(untyped)")
-        }
         guard let error = captured else {
             return ScenarioResult(id: "F6_mid_receive_tcp_rst", passed: false, detail: "drain succeeded; expected RST-induced typed error")
         }
