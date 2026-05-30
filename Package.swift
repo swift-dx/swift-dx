@@ -40,7 +40,6 @@ let package = Package(
     products: [
         .library(name: "DXCore", targets: ["DXCore"]),
         .library(name: "DXJetStream", targets: ["DXJetStream"]),
-        .library(name: "DXClickHouse", targets: ["DXClickHouse"]),
         .library(name: "DXClickHouseRaw", targets: ["DXClickHouseRaw"]),
         .library(name: "DXRedis", targets: ["DXRedis"]),
         .library(name: "DXJSONSchema", targets: ["DXJSONSchema"]),
@@ -79,18 +78,6 @@ let package = Package(
                 .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
             ],
             exclude: ["README.md"],
-            plugins: integrityPlugins
-        ),
-        .target(
-            name: "DXClickHouse",
-            dependencies: [
-                "DXCore",
-                .product(name: "NIOCore", package: "swift-nio"),
-                .product(name: "NIOPosix", package: "swift-nio"),
-                .product(name: "NIOSSL", package: "swift-nio-ssl"),
-                .product(name: "Instrumentation", package: "swift-distributed-tracing"),
-                .product(name: "Tracing", package: "swift-distributed-tracing"),
-            ],
             plugins: integrityPlugins
         ),
         .target(
@@ -135,20 +122,6 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
             ],
             path: "IntegrationTests/DXRedisIntegration",
-            plugins: integrityPlugins
-        ),
-        .testTarget(
-            name: "DXClickHouseTests",
-            dependencies: ["DXClickHouse"],
-            plugins: integrityPlugins
-        ),
-        .testTarget(
-            name: "DXClickHouseIntegration",
-            dependencies: [
-                "DXClickHouse",
-                .product(name: "NIOPosix", package: "swift-nio"),
-            ],
-            path: "IntegrationTests/DXClickHouseIntegration",
             plugins: integrityPlugins
         ),
         .testTarget(
