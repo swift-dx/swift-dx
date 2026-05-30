@@ -11,6 +11,8 @@
 
 struct JSONReader {
 
+    static let containerCapacityHint = 8
+
     enum SeparatorOutcome: Sendable, Equatable {
 
         case more

@@ -13,10 +13,10 @@ package struct JSONObject: Sendable {
 
     package struct Member: Sendable, Equatable {
 
-        package let key: String
+        package let key: JSONString
         package let value: JSONValue
 
-        package init(key: String, value: JSONValue) {
+        package init(key: JSONString, value: JSONValue) {
             self.key = key
             self.value = value
         }
@@ -33,18 +33,18 @@ package struct JSONObject: Sendable {
     }
 
     package var keys: [String] {
-        members.map(\.key)
+        members.map { $0.key.value }
     }
 
     package func lookup(_ key: String) -> Lookup<JSONValue> {
-        for member in members where member.key == key {
+        for member in members where member.key.equalsString(key) {
             return .found(member.value)
         }
         return .notFound
     }
 
     package func contains(_ key: String) -> Bool {
-        for member in members where member.key == key {
+        for member in members where member.key.equalsString(key) {
             return true
         }
         return false
@@ -59,7 +59,7 @@ extension JSONObject: Equatable {
     }
 
     private func allMembersMatch(_ other: JSONObject) -> Bool {
-        for member in members where other.lookup(member.key) != .found(member.value) {
+        for member in members where !other.members.contains(member) {
             return false
         }
         return true

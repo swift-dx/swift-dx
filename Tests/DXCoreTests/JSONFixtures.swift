@@ -26,7 +26,7 @@ enum JSONFixtures {
     }
 
     static func object(_ pairs: [(String, JSONValue)]) -> JSONValue {
-        .object(JSONObject(members: pairs.map { JSONObject.Member(key: $0.0, value: $0.1) }))
+        .object(JSONObject(members: pairs.map { JSONObject.Member(key: JSONString($0.0), value: $0.1) }))
     }
 
     static func array(_ elements: [JSONValue]) -> JSONValue {

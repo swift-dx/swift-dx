@@ -23,6 +23,7 @@ extension JSONReader {
         skipWhitespace()
         if try consumeClosingIfPresent(Ascii.braceClose) { return JSONObject(members: []) }
         var members: [JSONObject.Member] = []
+        members.reserveCapacity(JSONReader.containerCapacityHint)
         try readObjectMembers(into: &members)
         return JSONObject(members: members)
     }
@@ -43,7 +44,7 @@ extension JSONReader {
         try appendMember(key: key, value: value, into: &members)
     }
 
-    mutating func readObjectKey() throws(JSONParseError) -> String {
+    mutating func readObjectKey() throws(JSONParseError) -> JSONString {
         let byte = try currentByte()
         guard byte == Ascii.quote else { throw .unexpectedByte(byteOffset: position, found: byte) }
         return try readStringToken()
@@ -60,22 +61,22 @@ extension JSONReader {
         guard byte == expected else { throw .unexpectedByte(byteOffset: position, found: byte) }
     }
 
-    mutating func appendMember(key: String, value: JSONValue, into members: inout [JSONObject.Member]) throws(JSONParseError) {
+    mutating func appendMember(key: JSONString, value: JSONValue, into members: inout [JSONObject.Member]) throws(JSONParseError) {
         switch indexOfKey(key, in: members) {
         case .found(let index): try replaceOrReject(key: key, value: value, at: index, into: &members)
         case .notFound: members.append(JSONObject.Member(key: key, value: value))
         }
     }
 
-    func indexOfKey(_ key: String, in members: [JSONObject.Member]) -> Lookup<Int> {
+    func indexOfKey(_ key: JSONString, in members: [JSONObject.Member]) -> Lookup<Int> {
         for index in members.indices where members[index].key == key {
             return .found(index)
         }
         return .notFound
     }
 
-    mutating func replaceOrReject(key: String, value: JSONValue, at index: Int, into members: inout [JSONObject.Member]) throws(JSONParseError) {
-        guard limits.duplicateKeys == .lastValueWins else { throw .duplicateKey(byteOffset: position, key: key) }
+    mutating func replaceOrReject(key: JSONString, value: JSONValue, at index: Int, into members: inout [JSONObject.Member]) throws(JSONParseError) {
+        guard limits.duplicateKeys == .lastValueWins else { throw .duplicateKey(byteOffset: position, key: key.value) }
         members[index] = JSONObject.Member(key: key, value: value)
     }
 
@@ -91,6 +92,7 @@ extension JSONReader {
         skipWhitespace()
         if try consumeClosingIfPresent(Ascii.bracketClose) { return [] }
         var elements: [JSONValue] = []
+        elements.reserveCapacity(JSONReader.containerCapacityHint)
         try readArrayElements(into: &elements)
         return elements
     }

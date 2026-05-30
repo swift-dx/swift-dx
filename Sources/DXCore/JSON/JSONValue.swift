@@ -13,7 +13,7 @@ package enum JSONValue: Sendable {
 
     case object(JSONObject)
     case array([JSONValue])
-    case string(String)
+    case string(JSONString)
     case number(JSONNumber)
     case bool(Bool)
     case null
@@ -36,7 +36,7 @@ extension JSONValue: Equatable {
         switch (lhs, rhs) {
         case (.object(let a), .object(let b)): a == b
         case (.array(let a), .array(let b)): a == b
-        case (.string(let a), .string(let b)): a.utf8.elementsEqual(b.utf8)
+        case (.string(let a), .string(let b)): a == b
         case (.number(let a), .number(let b)): a == b
         case (.bool(let a), .bool(let b)): a == b
         case (.null, .null): true

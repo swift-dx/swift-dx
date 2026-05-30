@@ -26,12 +26,12 @@ extension JSONReader {
         case scalar
     }
 
-    mutating func readStringToken() throws(JSONParseError) -> String {
+    mutating func readStringToken() throws(JSONParseError) -> JSONString {
         position &+= 1
         return try scanPlainContent(position)
     }
 
-    mutating func scanPlainContent(_ start: Int) throws(JSONParseError) -> String {
+    mutating func scanPlainContent(_ start: Int) throws(JSONParseError) -> JSONString {
         while true {
             switch classifyStringByte(try currentByte()) {
             case .literal: position &+= 1
@@ -42,18 +42,19 @@ extension JSONReader {
         }
     }
 
-    mutating func makePlainString(_ start: Int) throws(JSONParseError) -> String {
-        guard let content = String(validating: bytes[start ..< position], as: UTF8.self) else {
+    mutating func makePlainString(_ start: Int) throws(JSONParseError) -> JSONString {
+        guard Utf8.isValid(bytes[start ..< position]) else {
             throw .invalidUTF8(byteOffset: position)
         }
+        let string = JSONString.slice(source: bytes, offset: start, length: position - start)
         position &+= 1
-        return content
+        return string
     }
 
-    mutating func readEscapedString(_ start: Int) throws(JSONParseError) -> String {
+    mutating func readEscapedString(_ start: Int) throws(JSONParseError) -> JSONString {
         var decoded = Array(bytes[start ..< position])
         try scanStringContent(into: &decoded)
-        return try decodeUTF8(decoded)
+        return JSONString(try decodeUTF8(decoded))
     }
 
     func decodeUTF8(_ raw: [UInt8]) throws(JSONParseError) -> String {
