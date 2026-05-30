@@ -10,22 +10,24 @@
 //===----------------------------------------------------------------------===//
 
 // Synchronous Query packet builder. Builds the raw bytes for one
-// SELECT into a single [UInt8] buffer. No NIO, no async; the caller
+// statement into a single [UInt8] buffer. No NIO, no async; the caller
 // hands the buffer to send().
 //
 // Wire layout (matching what Sources/DXClickHouse emits at the
 // negotiated revision used by RawClickHouseConnection):
 //
 //   UVarInt packetType = 1 (Query)
-//   String  queryID = ""
+//   String  queryID
 //   ClientInfo block (see encodeClientInfo)
-//   String  settings terminator = ""
+//   Settings list — sequence of (name, flags, value) triples + empty
+//                   terminator
 //   String  externallyGrantedRoles = ""  (revision >= 54472)
 //   String  interserverSecret = ""        (revision >= 54441)
 //   UVarInt stage = 2 (Complete)
 //   UVarInt compression = 0
 //   String  queryText
-//   String  parameters terminator = ""    (revision >= 54459)
+//   Parameters list — sequence of (name, customFlag, value) triples +
+//                     empty terminator                    (>= 54459)
 //   Empty Data packet to signal "no inline data follows":
 //     UVarInt packetType = 2 (Data)
 //     String  table = ""
@@ -62,21 +64,92 @@ public enum RawClickHouseQueryBuilder {
         return output
     }
 
+    // Backwards-compatible shorthand for the no-settings,
+    // no-parameters, blank-query-id case used by the original POSIX
+    // floor benchmarks and smoke tests.
     public static func buildQuery(_ sql: String) -> [UInt8] {
         var output: [UInt8] = []
-        output.reserveCapacity(sql.utf8.count + 256)
+        do {
+            try writeQuery(
+                sql,
+                queryID: "",
+                settings: .empty,
+                parameters: .empty,
+                revision: revision,
+                into: &output
+            )
+        } catch {
+            // The empty settings / parameters path cannot throw — encode
+            // only validates non-empty names. Re-emit an empty buffer in
+            // the impossible-state branch.
+            output.removeAll(keepingCapacity: false)
+        }
+        return output
+    }
+
+    // Full Query packet builder used by the production surface. Caller
+    // provides query ID, settings, and parameters; the builder applies
+    // revision-gated field skipping (parameters only emit for
+    // revision >= 54_459).
+    public static func buildQuery(
+        _ sql: String,
+        queryID: String,
+        settings: RawClickHouseQuerySettings,
+        parameters: RawClickHouseQueryParameters,
+        revision: UInt64
+    ) throws(RawClickHouseError) -> [UInt8] {
+        var output: [UInt8] = []
+        try writeQuery(
+            sql,
+            queryID: queryID,
+            settings: settings,
+            parameters: parameters,
+            revision: revision,
+            into: &output
+        )
+        return output
+    }
+
+    // Ping packet. Two bytes: UVarInt packetType = 4 (Ping). Used by
+    // pool preflight to validate a recycled connection before handing
+    // it back to a caller.
+    public static func buildPing() -> [UInt8] {
+        var output: [UInt8] = []
+        output.reserveCapacity(2)
+        RawClickHouseWire.writeUVarInt(4, into: &output)
+        return output
+    }
+
+    // Cancel packet. Single UVarInt = 3. Used by callers that abandon a
+    // SELECT stream mid-flight to instruct the server to stop emitting
+    // result blocks.
+    public static func buildCancel() -> [UInt8] {
+        var output: [UInt8] = []
+        output.reserveCapacity(2)
+        RawClickHouseWire.writeUVarInt(3, into: &output)
+        return output
+    }
+
+    private static func writeQuery(
+        _ sql: String,
+        queryID: String,
+        settings: RawClickHouseQuerySettings,
+        parameters: RawClickHouseQueryParameters,
+        revision: UInt64,
+        into output: inout [UInt8]
+    ) throws(RawClickHouseError) {
+        output.reserveCapacity(sql.utf8.count + 256 + settings.count * 64 + parameters.count * 64)
         RawClickHouseWire.writeUVarInt(1, into: &output) // packet type: Query
-        RawClickHouseWire.writeString("", into: &output) // query id
+        RawClickHouseWire.writeString(queryID, into: &output)
         encodeClientInfo(into: &output)
-        RawClickHouseWire.writeString("", into: &output) // settings terminator
+        try settings.encode(into: &output)
         RawClickHouseWire.writeString("", into: &output) // externally granted roles
         RawClickHouseWire.writeString("", into: &output) // interserver secret
         RawClickHouseWire.writeUVarInt(2, into: &output) // stage: Complete
         RawClickHouseWire.writeUVarInt(0, into: &output) // compression off
         RawClickHouseWire.writeString(sql, into: &output)
-        RawClickHouseWire.writeString("", into: &output) // parameters terminator
+        try parameters.encode(into: &output, revision: revision)
         appendEmptyDataPacket(into: &output)
-        return output
     }
 
     static func encodeClientInfo(into output: inout [UInt8]) {

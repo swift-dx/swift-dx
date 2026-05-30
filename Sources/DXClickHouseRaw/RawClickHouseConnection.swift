@@ -132,6 +132,52 @@ public final class RawClickHouseConnection {
         try sendAllWithReconnect(bytes)
     }
 
+    // Full-surface send: caller supplies a query ID (passed through to
+    // server logs and surfaced in system.query_log), a settings block
+    // applied for the duration of the query, and a parameter list bound
+    // to `{name:Type}` placeholders in the SQL.
+    public func sendQuery(
+        _ sql: String,
+        queryID: String,
+        settings: RawClickHouseQuerySettings = .empty,
+        parameters: RawClickHouseQueryParameters = .empty
+    ) throws(RawClickHouseError) {
+        let bytes = try RawClickHouseQueryBuilder.buildQuery(
+            sql,
+            queryID: queryID,
+            settings: settings,
+            parameters: parameters,
+            revision: negotiatedRevision
+        )
+        try sendAllWithReconnect(bytes)
+    }
+
+    // Sends a Ping packet (type=4) and waits for the matching Pong
+    // (type=4) reply. Used by the pool's preflight check to validate a
+    // recycled connection before handing it out. Any non-Pong packet
+    // (in particular an exception emitted while the previous query was
+    // still draining) surfaces a typed protocol error.
+    public func ping() throws(RawClickHouseError) {
+        try sendAllWithReconnect(RawClickHouseQueryBuilder.buildPing())
+        let packetType = try readUVarInt()
+        switch packetType {
+        case 4:
+            return
+        case 2:
+            let exception = try readExceptionPacket()
+            throw .queryFailed(serverException: exception)
+        default:
+            throw .protocolError(stage: "ping", message: "unexpected packet type \(packetType)")
+        }
+    }
+
+    // Sends a Cancel packet (type=3). The server stops streaming Data
+    // packets and follows with EndOfStream; the caller is responsible
+    // for draining packets until the terminator arrives.
+    public func sendCancel() throws(RawClickHouseError) {
+        try sendAllOnce(RawClickHouseQueryBuilder.buildCancel())
+    }
+
     // Pulls server packets until EndOfStream. Calls `consume` for each
     // Data packet (Totals/Extremes/Log/ProfileEvents pass through too;
     // empty header-only blocks are skipped). Returns the cumulative
@@ -166,6 +212,119 @@ public final class RawClickHouseConnection {
                 continue
             default:
                 throw .protocolError(stage: "receiveBlocks", message: "unexpected packet type \(packetType)")
+            }
+        }
+    }
+
+    // Callback set delivered to `receiveBlocksWithCallbacks`. Each
+    // closure is invoked synchronously on the worker thread that is
+    // draining the connection; the closure is expected to be cheap.
+    // Default closures throw nothing and ignore the event so callers
+    // can opt in to only the signals they need.
+    public struct ReceiveCallbacks {
+
+        public var onProgress: (RawClickHouseProgress) -> Void
+        public var onProfileInfo: (RawClickHouseProfileInfo) -> Void
+        public var onProfileEvents: (RawClickHouseProfileEvents) -> Void
+
+        public init(
+            onProgress: @escaping (RawClickHouseProgress) -> Void = { _ in },
+            onProfileInfo: @escaping (RawClickHouseProfileInfo) -> Void = { _ in },
+            onProfileEvents: @escaping (RawClickHouseProfileEvents) -> Void = { _ in }
+        ) {
+            self.onProgress = onProgress
+            self.onProfileInfo = onProfileInfo
+            self.onProfileEvents = onProfileEvents
+        }
+    }
+
+    // Same as `receiveBlocks` but raises Progress, ProfileInfo, and
+    // ProfileEvents packets to the caller via the supplied callbacks
+    // instead of silently dropping them. Exception packets still throw
+    // `queryFailed`; EndOfStream still returns the cumulative row count.
+    public func receiveBlocks(
+        callbacks: ReceiveCallbacks,
+        _ consume: (RawClickHouseBlock, UnsafeRawBufferPointer) throws -> Void
+    ) throws(RawClickHouseError) -> Int {
+        var totalRows = 0
+        while true {
+            let packetType = try readUVarInt()
+            switch packetType {
+            case 1:
+                totalRows += try readBlockPacket(revision: negotiatedRevision, consume: consume)
+            case 2:
+                let exception = try readExceptionPacket()
+                throw .queryFailed(serverException: exception)
+            case 3:
+                let progress = try readProgressPacket(revision: negotiatedRevision)
+                callbacks.onProgress(progress)
+            case 5:
+                return totalRows
+            case 6:
+                let profileInfo = try readProfileInfoPacket(revision: negotiatedRevision)
+                callbacks.onProfileInfo(profileInfo)
+            case 7, 8:
+                totalRows += try readBlockPacket(revision: negotiatedRevision, consume: consume)
+            case 14:
+                let hostName = try readString()
+                try skipBlock(revision: negotiatedRevision)
+                callbacks.onProfileEvents(RawClickHouseProfileEvents(hostName: hostName))
+            case 10:
+                _ = try readString()
+                try skipBlock(revision: negotiatedRevision)
+            case 11:
+                _ = try readString()
+                _ = try readString()
+            case 17:
+                _ = try readString()
+            case 4:
+                continue
+            default:
+                throw .protocolError(stage: "receiveBlocks", message: "unexpected packet type \(packetType)")
+            }
+        }
+    }
+
+    // Drain-only variant with the full callback set. Same packet
+    // handling as `receiveBlocks(callbacks:_:)` but the per-block
+    // body bytes are dropped instead of being copied for the caller.
+    public func receiveBlocksDrain(
+        callbacks: ReceiveCallbacks,
+        _ consume: (Int, [String], [String]) throws -> Void
+    ) throws(RawClickHouseError) -> Int {
+        var totalRows = 0
+        while true {
+            let packetType = try readUVarInt()
+            switch packetType {
+            case 1, 7, 8:
+                totalRows += try drainBlockPacket(revision: negotiatedRevision, consume: consume)
+            case 2:
+                let exception = try readExceptionPacket()
+                throw .queryFailed(serverException: exception)
+            case 3:
+                let progress = try readProgressPacket(revision: negotiatedRevision)
+                callbacks.onProgress(progress)
+            case 5:
+                return totalRows
+            case 6:
+                let profileInfo = try readProfileInfoPacket(revision: negotiatedRevision)
+                callbacks.onProfileInfo(profileInfo)
+            case 14:
+                let hostName = try readString()
+                try skipBlock(revision: negotiatedRevision)
+                callbacks.onProfileEvents(RawClickHouseProfileEvents(hostName: hostName))
+            case 10:
+                _ = try readString()
+                try skipBlock(revision: negotiatedRevision)
+            case 11:
+                _ = try readString()
+                _ = try readString()
+            case 17:
+                _ = try readString()
+            case 4:
+                continue
+            default:
+                throw .protocolError(stage: "receiveBlocksDrain", message: "unexpected packet type \(packetType)")
             }
         }
     }
@@ -271,6 +430,56 @@ public final class RawClickHouseConnection {
             throw .protocolError(stage: "receiveScalarUInt64", message: "expected exactly one UInt64 scalar")
         }
         return result
+    }
+
+    // Package-internal accessors used by the Codable INSERT path
+    // (RawClickHouseConnection+Insert.swift). These thin wrappers
+    // forward to the same private helpers the sync receive loop uses,
+    // without widening the public surface of the type.
+    internal func readUVarIntInternal() throws(RawClickHouseError) -> UInt64 {
+        try readUVarInt()
+    }
+
+    internal func readStringInternal() throws(RawClickHouseError) -> String {
+        try readString()
+    }
+
+    internal func readExceptionPacketInternal() throws(RawClickHouseError) -> RawClickHouseServerException {
+        try readExceptionPacket()
+    }
+
+    internal func skipProgressPacketInternal() throws(RawClickHouseError) {
+        try skipProgressPacket(revision: negotiatedRevision)
+    }
+
+    internal func readProgressPacketInternal() throws(RawClickHouseError) -> RawClickHouseProgress {
+        try readProgressPacket(revision: negotiatedRevision)
+    }
+
+    internal func skipProfileInfoPacketInternal() throws(RawClickHouseError) {
+        try skipProfileInfoPacket(revision: negotiatedRevision)
+    }
+
+    internal func skipBlockInternal() throws(RawClickHouseError) {
+        try skipBlock(revision: negotiatedRevision)
+    }
+
+    internal func parseSampleBlockHeaderInternal() throws(RawClickHouseError) -> [RawClickHouseConnection.InsertSchemaColumn] {
+        _ = try readString() // table name
+        let prologue = try parsePrologue()
+        var schema: [RawClickHouseConnection.InsertSchemaColumn] = []
+        schema.reserveCapacity(prologue.columnCount)
+        for _ in 0..<prologue.columnCount {
+            let header = try parseColumnHeader(revision: negotiatedRevision)
+            try skipColumnBody(typeName: header.type, rows: prologue.rowCount)
+            schema.append(.init(name: header.name, typeName: header.type))
+        }
+        arena.compact()
+        return schema
+    }
+
+    internal func sendAllWithReconnectInternal(_ bytes: [UInt8]) throws(RawClickHouseError) {
+        try sendAllWithReconnect(bytes)
     }
 
     // Opens a fresh socket, sends Hello, parses ServerHello, sends
@@ -844,6 +1053,21 @@ public final class RawClickHouseConnection {
     }
 
     private func copyColumnBody(typeName: String, rows: Int, into output: inout [UInt8]) throws(RawClickHouseError) {
+        // Nullable(T) on the wire is `rowCount` null-mask bytes
+        // followed by `rowCount` inner-T values. We preserve this exact
+        // layout in the output so the typed Codable decoder can lift
+        // mask + inner column directly.
+        if typeName.hasPrefix("Nullable(") {
+            try ensureBytes(rows)
+            arena.withReadPointer { base, _ in
+                let buffer = UnsafeBufferPointer(start: base, count: rows)
+                output.append(contentsOf: buffer)
+            }
+            arena.advanceHead(by: rows)
+            let inner = String(typeName.dropFirst("Nullable(".count).dropLast())
+            try copyColumnBody(typeName: inner, rows: rows, into: &output)
+            return
+        }
         let byteCount = try columnByteWidth(typeName: typeName, rows: rows)
         if byteCount >= 0 {
             try ensureBytes(byteCount)
@@ -892,41 +1116,82 @@ public final class RawClickHouseConnection {
         }
     }
 
-    private func readExceptionPacket() throws(RawClickHouseError) -> String {
+    private func readExceptionPacket() throws(RawClickHouseError) -> RawClickHouseServerException {
         let code = try readFixedInt(Int32.self)
         let name = try readString()
         let message = try readString()
-        _ = try readString() // stack trace
+        let stackTrace = try readString()
         let hasNested = try readByte()
+        var nested: [RawClickHouseServerException] = []
         if hasNested != 0 {
-            _ = try readExceptionPacket()
+            let inner = try readExceptionPacket()
+            nested.append(inner)
         }
-        return "code=\(code) name=\(name) message=\(message)"
+        return RawClickHouseServerException(
+            code: code,
+            name: name,
+            message: message,
+            stackTrace: stackTrace,
+            nested: nested
+        )
     }
 
     private func skipProgressPacket(revision: UInt64) throws(RawClickHouseError) {
-        _ = try readUVarInt() // rows
-        _ = try readUVarInt() // bytes
-        _ = try readUVarInt() // total rows
-        if revision >= 54_463 { _ = try readUVarInt() } // total bytes
+        _ = try readProgressPacket(revision: revision)
+    }
+
+    private func readProgressPacket(revision: UInt64) throws(RawClickHouseError) -> RawClickHouseProgress {
+        let rows = try readUVarInt()
+        let bytes = try readUVarInt()
+        let totalRows = try readUVarInt()
+        var totalBytes: UInt64 = 0
+        if revision >= 54_463 { totalBytes = try readUVarInt() }
+        var writtenRows: UInt64 = 0
+        var writtenBytes: UInt64 = 0
         if revision >= 54_420 {
-            _ = try readUVarInt() // written rows
-            _ = try readUVarInt() // written bytes
+            writtenRows = try readUVarInt()
+            writtenBytes = try readUVarInt()
         }
-        if revision >= 54_460 { _ = try readUVarInt() } // elapsed ns
+        var elapsed: UInt64 = 0
+        if revision >= 54_460 { elapsed = try readUVarInt() }
+        return RawClickHouseProgress(
+            rows: rows,
+            bytes: bytes,
+            totalRows: totalRows,
+            totalBytes: totalBytes,
+            writtenRows: writtenRows,
+            writtenBytes: writtenBytes,
+            elapsedNanoseconds: elapsed
+        )
     }
 
     private func skipProfileInfoPacket(revision: UInt64) throws(RawClickHouseError) {
-        _ = try readUVarInt() // rows
-        _ = try readUVarInt() // blocks
-        _ = try readUVarInt() // bytes
-        _ = try readByte() // applied limit
-        _ = try readUVarInt() // rows before limit
-        _ = try readByte() // calculated rows before limit
+        _ = try readProfileInfoPacket(revision: revision)
+    }
+
+    private func readProfileInfoPacket(revision: UInt64) throws(RawClickHouseError) -> RawClickHouseProfileInfo {
+        let rows = try readUVarInt()
+        let blocks = try readUVarInt()
+        let bytes = try readUVarInt()
+        let appliedLimit = try readByte() != 0
+        let rowsBeforeLimit = try readUVarInt()
+        let calculatedRowsBeforeLimit = try readByte() != 0
+        var appliedAggregation = false
+        var rowsBeforeAggregation: UInt64 = 0
         if revision >= 54_469 {
-            _ = try readByte() // applied aggregation
-            _ = try readUVarInt() // rows before aggregation
+            appliedAggregation = try readByte() != 0
+            rowsBeforeAggregation = try readUVarInt()
         }
+        return RawClickHouseProfileInfo(
+            rows: rows,
+            blocks: blocks,
+            bytes: bytes,
+            appliedLimit: appliedLimit,
+            rowsBeforeLimit: rowsBeforeLimit,
+            calculatedRowsBeforeLimit: calculatedRowsBeforeLimit,
+            appliedAggregation: appliedAggregation,
+            rowsBeforeAggregation: rowsBeforeAggregation
+        )
     }
 
     @inline(__always)
@@ -1071,7 +1336,7 @@ public final class RawClickHouseConnection {
         switch error {
         case .socketIOFailed, .unexpectedEOF:
             return reconnectionPolicy.maxAttempts > 0
-        case .connectionFailed, .protocolError, .queryFailed, .reconnectExhausted:
+        case .connectionFailed, .protocolError, .queryFailed, .reconnectExhausted, .endpointsExhausted:
             return false
         }
     }

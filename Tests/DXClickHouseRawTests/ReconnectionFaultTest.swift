@@ -77,7 +77,7 @@ struct RawClickHouseReconnectionFaultTests {
             #expect(value == 7)
         } catch let error as RawClickHouseError {
             switch error {
-            case .socketIOFailed, .unexpectedEOF, .connectionFailed, .reconnectExhausted:
+            case .socketIOFailed, .unexpectedEOF, .connectionFailed, .reconnectExhausted, .endpointsExhausted:
                 // Acceptable transient outcomes: the test does NOT
                 // require the very-first replay to succeed in every
                 // race; what it requires is that the FOLLOWUP send,

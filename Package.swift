@@ -154,6 +154,11 @@ let package = Package(
             name: "DXClickHouseRawTests",
             dependencies: ["DXClickHouseRaw"]
         ),
+        .testTarget(
+            name: "DXClickHouseRawIntegration",
+            dependencies: ["DXClickHouseRaw"],
+            path: "IntegrationTests/DXClickHouseRawIntegration"
+        ),
         .target(
             name: "DXJSONSchema",
             dependencies: [

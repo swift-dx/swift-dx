@@ -87,6 +87,49 @@ public final actor AsyncRawClickHouseConnection {
         }
     }
 
+    // Full-surface async send: query ID, settings, parameters bridged
+    // to the worker thread. Caller awaits one continuation hop per
+    // call.
+    public func sendQuery(
+        _ sql: String,
+        queryID: String,
+        settings: RawClickHouseQuerySettings = .empty,
+        parameters: RawClickHouseQueryParameters = .empty
+    ) async throws {
+        let transport = self.transport
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            worker.async {
+                do {
+                    try transport.connection.sendQuery(
+                        sql,
+                        queryID: queryID,
+                        settings: settings,
+                        parameters: parameters
+                    )
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    // Round-trip Ping → Pong. Pool preflight uses this to validate a
+    // recycled connection before handing it back to a caller.
+    public func ping() async throws {
+        let transport = self.transport
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            worker.async {
+                do {
+                    try transport.connection.ping()
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     // One-shot drain: posts a single work item that runs the sync receive
     // loop end-to-end. The continuation resumes exactly once when the
     // server signals EndOfStream. This is the floor-shape async surface
@@ -97,6 +140,33 @@ public final actor AsyncRawClickHouseConnection {
             worker.async {
                 do {
                     let rows = try transport.connection.receiveBlocksDrain { _, _, _ in }
+                    continuation.resume(returning: rows)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    // Drain with the full callback set bridged to the worker. The
+    // callbacks fire on the worker queue; callers that need to mutate
+    // outside state from inside a callback are responsible for their
+    // own synchronisation.
+    public func drainBlocks(
+        onProgress: @escaping @Sendable (RawClickHouseProgress) -> Void = { _ in },
+        onProfileInfo: @escaping @Sendable (RawClickHouseProfileInfo) -> Void = { _ in },
+        onProfileEvents: @escaping @Sendable (RawClickHouseProfileEvents) -> Void = { _ in }
+    ) async throws -> Int {
+        let transport = self.transport
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Int, Error>) in
+            worker.async {
+                do {
+                    let callbacks = RawClickHouseConnection.ReceiveCallbacks(
+                        onProgress: onProgress,
+                        onProfileInfo: onProfileInfo,
+                        onProfileEvents: onProfileEvents
+                    )
+                    let rows = try transport.connection.receiveBlocksDrain(callbacks: callbacks) { _, _, _ in }
                     continuation.resume(returning: rows)
                 } catch {
                     continuation.resume(throwing: error)
