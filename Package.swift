@@ -41,6 +41,7 @@ let package = Package(
         .library(name: "DXCore", targets: ["DXCore"]),
         .library(name: "DXJetStream", targets: ["DXJetStream"]),
         .library(name: "DXRedis", targets: ["DXRedis"]),
+        .library(name: "DXJSONSchema", targets: ["DXJSONSchema"]),
     ],
     dependencies: packageDependencies,
     targets: [
@@ -116,6 +117,34 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
             ],
             path: "IntegrationTests/DXRedisIntegration",
+            plugins: integrityPlugins
+        ),
+        .target(
+            name: "DXJSONSchema",
+            dependencies: [
+                "DXCore",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "Atomics", package: "swift-atomics"),
+            ],
+            plugins: integrityPlugins
+        ),
+        .testTarget(
+            name: "DXJSONSchemaTests",
+            dependencies: [
+                "DXJSONSchema",
+                .product(name: "NIOCore", package: "swift-nio"),
+            ],
+            plugins: integrityPlugins
+        ),
+        .testTarget(
+            name: "DXJSONSchemaComplianceTests",
+            dependencies: [
+                "DXJSONSchema",
+                "DXCore",
+            ],
+            resources: [
+                .copy("Resources/suite"),
+            ],
             plugins: integrityPlugins
         ),
     ],

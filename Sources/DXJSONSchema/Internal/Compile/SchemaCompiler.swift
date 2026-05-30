@@ -85,7 +85,7 @@ struct SchemaCompiler {
         nodeResource[index] = currentResourceNode
         var keywords: [CompiledKeyword] = []
         for member in object.members {
-            try compileKeyword(member.key, value: member.value, siblings: object, node: index, at: location, into: &keywords)
+            try compileKeyword(member.key.value, value: member.value, siblings: object, node: index, at: location, into: &keywords)
         }
         currentBase = savedBase
         currentResourceNode = savedResourceNode

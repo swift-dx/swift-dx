@@ -82,12 +82,12 @@ extension Validator {
         context.popInstance()
     }
 
-    static func checkAdditionalProperties(_ declared: Set<String>, _ patterns: [CompiledPattern], _ schema: Int, _ value: JSONValue, _ context: ValidationContext) {
+    static func checkAdditionalProperties(_ declared: Set<JSONString>, _ patterns: [CompiledPattern], _ schema: Int, _ value: JSONValue, _ context: ValidationContext) {
         guard case .object(let object) = value else { return }
         validateAdditional(declared, patterns, schema, object, context)
     }
 
-    static func validateAdditional(_ declared: Set<String>, _ patterns: [CompiledPattern], _ schema: Int, _ object: JSONObject, _ context: ValidationContext) {
+    static func validateAdditional(_ declared: Set<JSONString>, _ patterns: [CompiledPattern], _ schema: Int, _ object: JSONObject, _ context: ValidationContext) {
         context.pushKeyword("additionalProperties")
         for member in object.members where isAdditional(member.key, declared, patterns) {
             validateAdditionalMember(schema, member, context)
@@ -95,21 +95,21 @@ extension Validator {
         context.popKeyword()
     }
 
-    static func isAdditional(_ key: String, _ declared: Set<String>, _ patterns: [CompiledPattern]) -> Bool {
+    static func isAdditional(_ key: JSONString, _ declared: Set<JSONString>, _ patterns: [CompiledPattern]) -> Bool {
         guard !declared.contains(key) else { return false }
         return !anyPatternMatches(key, patterns)
     }
 
-    static func anyPatternMatches(_ key: String, _ patterns: [CompiledPattern]) -> Bool {
-        for pattern in patterns where pattern.matches(key) {
+    static func anyPatternMatches(_ key: JSONString, _ patterns: [CompiledPattern]) -> Bool {
+        for pattern in patterns where pattern.matches(key.value) {
             return true
         }
         return false
     }
 
     static func validateAdditionalMember(_ schema: Int, _ member: JSONObject.Member, _ context: ValidationContext) {
-        context.markProperty(member.key)
-        context.pushInstanceKey(member.key)
+        context.markProperty(member.key.value)
+        context.pushInstanceKey(member.key.value)
         validateInScope(member.value, at: schema, context: context)
         context.popInstance()
     }

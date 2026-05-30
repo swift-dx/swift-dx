@@ -18,8 +18,8 @@ extension Validator {
         enforceFormat(kind, string, context)
     }
 
-    static func enforceFormat(_ kind: FormatKind, _ string: String, _ context: ValidationContext) {
-        guard !FormatValidator.check(kind, string) else { return }
+    static func enforceFormat(_ kind: FormatKind, _ string: JSONString, _ context: ValidationContext) {
+        guard !FormatValidator.check(kind, string.value) else { return }
         context.record(keyword: "format", message: "string does not satisfy the required format")
     }
 }

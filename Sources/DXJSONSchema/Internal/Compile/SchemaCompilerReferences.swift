@@ -15,7 +15,7 @@ extension SchemaCompiler {
 
     mutating func applyIdentifier(_ object: JSONObject, node: Int, at location: String) {
         guard case .found(.string(let identifier)) = object.lookup("$id") else { return }
-        registerIdentifier(identifier, node: node, at: location)
+        registerIdentifier(identifier.value, node: node, at: location)
     }
 
     mutating func registerIdentifier(_ identifier: String, node: Int, at location: String) {
@@ -59,7 +59,7 @@ extension SchemaCompiler {
 
     mutating func compileDefinitionMembers(_ object: JSONObject, at location: String) throws(JSONSchemaError) {
         for member in object.members {
-            _ = try compileSubschema(member.value, at: location + "/$defs/" + member.key)
+            _ = try compileSubschema(member.value, at: location + "/$defs/" + member.key.value)
         }
     }
 

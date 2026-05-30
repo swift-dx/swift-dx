@@ -63,12 +63,12 @@ extension SchemaCompiler {
         guard case .string(let string) = value else {
             throw .keywordValueMalformed(keyword: keyword, keywordLocation: location, expected: "an array of strings")
         }
-        return string
+        return string.value
     }
 
     func buildTypeConstraint(_ value: JSONValue, at location: String) throws(JSONSchemaError) -> TypeConstraint {
         switch value {
-        case .string(let name): return TypeConstraint(allowed: [try typeKind(name, at: location)])
+        case .string(let name): return TypeConstraint(allowed: [try typeKind(name.value, at: location)])
         case .array(let names): return TypeConstraint(allowed: try typeKindSet(names, at: location))
         default: throw .keywordValueMalformed(keyword: "type", keywordLocation: location, expected: "a string or array of strings")
         }
@@ -86,7 +86,7 @@ extension SchemaCompiler {
         guard case .string(let name) = value else {
             throw .keywordValueMalformed(keyword: "type", keywordLocation: location, expected: "a string or array of strings")
         }
-        return try typeKind(name, at: location)
+        return try typeKind(name.value, at: location)
     }
 
     func typeKind(_ name: String, at location: String) throws(JSONSchemaError) -> JSONValueKind {

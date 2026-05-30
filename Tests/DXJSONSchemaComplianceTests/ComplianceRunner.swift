@@ -97,6 +97,6 @@ enum ComplianceRunner {
 
     static func stringMember(_ object: JSONObject, _ key: String) -> String {
         guard case .found(.string(let value)) = object.lookup(key) else { return "" }
-        return value
+        return value.value
     }
 }

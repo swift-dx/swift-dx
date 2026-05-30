@@ -118,6 +118,12 @@ struct AssertionValidationTests {
     }
 
     @Test
+    func multipleOfAcceptsValueWhoseQuotientOverflows() throws {
+        let schema = try JSONSchema.compile(#"{"type":"integer","multipleOf":0.5}"#)
+        #expect(schema.validate("1e308").isValid)
+    }
+
+    @Test
     func maximumOnLargeIntegerIsExact() throws {
         let schema = try JSONSchema.compile(#"{"maximum":9223372036854775807}"#)
         #expect(schema.validate("9223372036854775807").isValid)

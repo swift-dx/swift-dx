@@ -43,7 +43,7 @@ enum CompiledKeyword: Sendable {
     case contains(schema: Int, minimum: Int, maximum: ContainsMaximum)
     case unevaluatedProperties(Int)
     case unevaluatedItems(Int)
-    case additionalProperties(declared: Set<String>, patterns: [CompiledPattern], schema: Int)
+    case additionalProperties(declared: Set<JSONString>, patterns: [CompiledPattern], schema: Int)
     case allOf([Int])
     case anyOf([Int])
     case oneOf([Int])

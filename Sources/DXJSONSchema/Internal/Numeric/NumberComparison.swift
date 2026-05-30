@@ -56,6 +56,7 @@ enum NumberComparison {
     static func doubleMultiple(_ value: Double, _ factor: Double) -> Bool {
         guard factor != 0 else { return false }
         let quotient = value / factor
-        return quotient.isFinite && quotient.rounded() == quotient
+        guard quotient.isFinite else { return value.truncatingRemainder(dividingBy: factor) == 0 }
+        return quotient.rounded() == quotient
     }
 }

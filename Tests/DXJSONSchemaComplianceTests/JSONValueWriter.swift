@@ -17,7 +17,7 @@ enum JSONValueWriter {
         switch value {
         case .object(let object): writeObject(object)
         case .array(let elements): writeArray(elements)
-        case .string(let text): writeString(text)
+        case .string(let text): writeString(text.value)
         case .number(let number): number.source
         case .bool(let flag): writeBool(flag)
         case .null: "null"
@@ -34,7 +34,7 @@ enum JSONValueWriter {
     }
 
     static func writeMember(_ member: JSONObject.Member) -> String {
-        writeString(member.key) + ":" + write(member.value)
+        writeString(member.key.value) + ":" + write(member.value)
     }
 
     static func writeArray(_ elements: [JSONValue]) -> String {

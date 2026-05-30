@@ -18,8 +18,8 @@ extension SchemaCompiler {
 
     func resolveActiveVocabularies(_ schema: JSONValue, _ resources: [ResourceDocument]) throws(JSONSchemaError) -> Set<SchemaVocabulary> {
         guard case .object(let object) = schema, case .found(.string(let dialect)) = object.lookup("$schema") else { return SchemaVocabulary.all }
-        guard dialect != Self.standardDialect else { return SchemaVocabulary.all }
-        return try vocabulariesFromMetaschema(dialect, resources)
+        guard dialect.value != Self.standardDialect else { return SchemaVocabulary.all }
+        return try vocabulariesFromMetaschema(dialect.value, resources)
     }
 
     func vocabulariesFromMetaschema(_ dialect: String, _ resources: [ResourceDocument]) throws(JSONSchemaError) -> Set<SchemaVocabulary> {
@@ -44,7 +44,7 @@ extension SchemaCompiler {
     }
 
     func includeVocabulary(_ member: JSONObject.Member, into active: inout Set<SchemaVocabulary>) throws(JSONSchemaError) {
-        switch knownVocabulary(member.key) {
+        switch knownVocabulary(member.key.value) {
         case .found(let vocabulary): active.insert(vocabulary)
         case .notFound: try rejectIfRequired(member)
         }
@@ -52,7 +52,7 @@ extension SchemaCompiler {
 
     func rejectIfRequired(_ member: JSONObject.Member) throws(JSONSchemaError) {
         guard case .bool(true) = member.value else { return }
-        throw .unknownRequiredVocabulary(uri: member.key)
+        throw .unknownRequiredVocabulary(uri: member.key.value)
     }
 
     func knownVocabulary(_ uri: String) -> Lookup<SchemaVocabulary> {
@@ -75,7 +75,7 @@ extension SchemaCompiler {
     func vocabulary(for keyword: String) -> SchemaVocabulary {
         switch keyword {
         case "type", "const", "enum", "multipleOf", "maximum", "exclusiveMaximum", "minimum", "exclusiveMinimum", "maxLength", "minLength", "pattern", "maxItems", "minItems", "maxContains", "minContains", "uniqueItems", "maxProperties", "minProperties", "required", "dependentRequired": .validation
-        case "prefixItems", "items", "contains", "additionalProperties", "properties", "patternProperties", "dependentSchemas", "propertyNames", "allOf", "anyOf", "oneOf", "not", "if": .applicator
+        case "prefixItems", "items", "contains", "additionalProperties", "properties", "patternProperties", "dependentSchemas", "propertyNames", "allOf", "anyOf", "oneOf", "not", "if", "then", "else": .applicator
         case "unevaluatedItems", "unevaluatedProperties": .unevaluated
         case "format": .formatAnnotation
         default: .core

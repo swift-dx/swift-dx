@@ -18,8 +18,8 @@ extension Validator {
         enforceMaxLength(limit, string, context)
     }
 
-    static func enforceMaxLength(_ limit: Int, _ string: String, _ context: ValidationContext) {
-        guard string.unicodeScalars.count > limit else { return }
+    static func enforceMaxLength(_ limit: Int, _ string: JSONString, _ context: ValidationContext) {
+        guard string.scalarCount > limit else { return }
         context.record(keyword: "maxLength", message: "string is longer than maxLength \(limit)")
     }
 
@@ -28,8 +28,8 @@ extension Validator {
         enforceMinLength(limit, string, context)
     }
 
-    static func enforceMinLength(_ limit: Int, _ string: String, _ context: ValidationContext) {
-        guard string.unicodeScalars.count < limit else { return }
+    static func enforceMinLength(_ limit: Int, _ string: JSONString, _ context: ValidationContext) {
+        guard string.scalarCount < limit else { return }
         context.record(keyword: "minLength", message: "string is shorter than minLength \(limit)")
     }
 

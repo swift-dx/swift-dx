@@ -22,7 +22,10 @@
     "DXJetStream": "default",
     "DXCoreTests": "default",
     "DXJetStreamTests": "default",
-    "DXJetStreamIntegration": "default"
+    "DXJetStreamIntegration": "default",
+    "DXJSONSchema": "default",
+    "DXJSONSchemaTests": "default",
+    "DXJSONSchemaComplianceTests": "default"
   },
   "exemptions": [
     {

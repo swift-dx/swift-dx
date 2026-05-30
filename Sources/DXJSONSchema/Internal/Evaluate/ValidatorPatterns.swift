@@ -18,8 +18,8 @@ extension Validator {
         enforcePattern(pattern, string, context)
     }
 
-    static func enforcePattern(_ pattern: CompiledPattern, _ string: String, _ context: ValidationContext) {
-        guard !pattern.matches(string) else { return }
+    static func enforcePattern(_ pattern: CompiledPattern, _ string: JSONString, _ context: ValidationContext) {
+        guard !pattern.matches(string.value) else { return }
         context.record(keyword: "pattern", message: "string does not match the required pattern \(pattern.source)")
     }
 
@@ -43,14 +43,14 @@ extension Validator {
     }
 
     static func validateMatchingMembers(_ entry: PatternSchema, _ object: JSONObject, _ context: ValidationContext) {
-        for member in object.members where entry.pattern.matches(member.key) {
+        for member in object.members where entry.pattern.matches(member.key.value) {
             validateMatchingMember(entry.schema, member, context)
         }
     }
 
     static func validateMatchingMember(_ schema: Int, _ member: JSONObject.Member, _ context: ValidationContext) {
-        context.markProperty(member.key)
-        context.pushInstanceKey(member.key)
+        context.markProperty(member.key.value)
+        context.pushInstanceKey(member.key.value)
         validateInScope(member.value, at: schema, context: context)
         context.popInstance()
     }
@@ -62,7 +62,7 @@ extension Validator {
 
     static func validatePropertyNames(_ schema: Int, _ object: JSONObject, _ context: ValidationContext) {
         for member in object.members where !branchValidates(.string(member.key), schema, context) {
-            recordPropertyName(member.key, context)
+            recordPropertyName(member.key.value, context)
         }
     }
 

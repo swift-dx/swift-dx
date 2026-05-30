@@ -17,7 +17,7 @@ extension SchemaCompiler {
         guard case .string(let string) = value else {
             throw .keywordValueMalformed(keyword: keyword, keywordLocation: location, expected: "a string")
         }
-        return string
+        return string.value
     }
 
     mutating func compileFormat(_ value: JSONValue, at location: String, into keywords: inout [CompiledKeyword]) throws(JSONSchemaError) {
@@ -68,7 +68,7 @@ extension SchemaCompiler {
     func compilePatternList(_ object: JSONObject, at location: String) throws(JSONSchemaError) -> [CompiledPattern] {
         var patterns: [CompiledPattern] = []
         for member in object.members {
-            patterns.append(try CompiledPattern(member.key, at: location + "/patternProperties"))
+            patterns.append(try CompiledPattern(member.key.value, at: location + "/patternProperties"))
         }
         return patterns
     }
@@ -89,8 +89,8 @@ extension SchemaCompiler {
     }
 
     mutating func compilePatternSchema(_ member: JSONObject.Member, at location: String) throws(JSONSchemaError) -> PatternSchema {
-        let pattern = try CompiledPattern(member.key, at: location + "/patternProperties/" + member.key)
-        let index = try compileSubschema(member.value, at: location + "/patternProperties/" + member.key)
+        let pattern = try CompiledPattern(member.key.value, at: location + "/patternProperties/" + member.key.value)
+        let index = try compileSubschema(member.value, at: location + "/patternProperties/" + member.key.value)
         return PatternSchema(pattern: pattern, schema: index)
     }
 
@@ -104,7 +104,7 @@ extension SchemaCompiler {
     func buildDependentRequirements(_ object: JSONObject, at location: String) throws(JSONSchemaError) -> [DependentRequirement] {
         var list: [DependentRequirement] = []
         for member in object.members {
-            list.append(DependentRequirement(trigger: member.key, required: try requireStringArray(member.value, keyword: "dependentRequired", at: location)))
+            list.append(DependentRequirement(trigger: member.key.value, required: try requireStringArray(member.value, keyword: "dependentRequired", at: location)))
         }
         return list
     }
@@ -119,8 +119,8 @@ extension SchemaCompiler {
     mutating func buildDependentSchemas(_ object: JSONObject, at location: String) throws(JSONSchemaError) -> [DependentSchema] {
         var list: [DependentSchema] = []
         for member in object.members {
-            let index = try compileSubschema(member.value, at: location + "/dependentSchemas/" + member.key)
-            list.append(DependentSchema(trigger: member.key, schema: index))
+            let index = try compileSubschema(member.value, at: location + "/dependentSchemas/" + member.key.value)
+            list.append(DependentSchema(trigger: member.key.value, schema: index))
         }
         return list
     }

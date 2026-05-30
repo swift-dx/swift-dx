@@ -20,15 +20,15 @@ extension Validator {
 
     static func validateUnevaluatedProperties(_ schema: Int, _ object: JSONObject, _ context: ValidationContext) {
         context.pushKeyword("unevaluatedProperties")
-        for member in object.members where !context.currentFrame.evaluatedProperties.contains(member.key) {
+        for member in object.members where !context.currentFrame.evaluatedProperties.contains(member.key.value) {
             validateUnevaluatedMember(schema, member, context)
         }
         context.popKeyword()
     }
 
     static func validateUnevaluatedMember(_ schema: Int, _ member: JSONObject.Member, _ context: ValidationContext) {
-        context.markProperty(member.key)
-        context.pushInstanceKey(member.key)
+        context.markProperty(member.key.value)
+        context.pushInstanceKey(member.key.value)
         validateInScope(member.value, at: schema, context: context)
         context.popInstance()
     }

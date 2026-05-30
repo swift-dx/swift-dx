@@ -35,8 +35,8 @@ extension SchemaCompiler {
     mutating func compilePropertyList(_ object: JSONObject, at location: String) throws(JSONSchemaError) -> [PropertySchema] {
         var list: [PropertySchema] = []
         for member in object.members {
-            let index = try compileSubschema(member.value, at: location + "/properties/" + member.key)
-            list.append(PropertySchema(name: member.key, schema: index))
+            let index = try compileSubschema(member.value, at: location + "/properties/" + member.key.value)
+            list.append(PropertySchema(name: member.key.value, schema: index))
         }
         return list
     }
@@ -48,9 +48,9 @@ extension SchemaCompiler {
         keywords.append(.additionalProperties(declared: declared, patterns: patterns, schema: index))
     }
 
-    func declaredPropertyNames(_ siblings: JSONObject) -> Set<String> {
+    func declaredPropertyNames(_ siblings: JSONObject) -> Set<JSONString> {
         guard case .found(.object(let properties)) = siblings.lookup("properties") else { return [] }
-        return Set(properties.keys)
+        return Set(properties.members.map { $0.key })
     }
 
     mutating func compileSubschemaArray(_ value: JSONValue, keyword: String, at location: String) throws(JSONSchemaError) -> [Int] {
