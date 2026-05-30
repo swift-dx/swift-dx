@@ -85,6 +85,11 @@
       "path": "Sources/DXClickHouse/Public/ClickHouseService.swift",
       "rules": ["S010"],
       "reason": "swift-service-lifecycle's Service protocol mandates `func run() async throws` with untyped throws. Conforming actors must match that signature exactly. The typed-throws contract is therefore impossible on this single method; every other public throwing function on the service surface remains typed-throws."
+    },
+    {
+      "path": "Sources/DXRedis/Public/Client/RedisClient+Service.swift",
+      "rules": ["S010"],
+      "reason": "swift-service-lifecycle's Service protocol mandates `func run() async throws` with untyped throws. Conforming types must match that signature exactly. The typed-throws contract is therefore impossible on this single method; every other public throwing function on the client surface remains typed-throws."
     }
   ]
 }
