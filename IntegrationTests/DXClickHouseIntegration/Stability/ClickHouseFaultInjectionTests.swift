@@ -171,7 +171,7 @@ struct ClickHouseFaultInjectionTests {
             switch captured {
             case .connectionFailed, .socketIOFailed, .unexpectedEOF, .reconnectExhausted:
                 break
-            case .protocolError, .queryFailed, .endpointsExhausted:
+            case .protocolError, .queryFailed, .endpointsExhausted, .queryTimeout:
                 Issue.record("unexpected typed error for wrong-port connect: \(captured)")
             }
         }
@@ -267,7 +267,7 @@ struct ClickHouseFaultInjectionTests {
         case .queryFailed(let exception):
             #expect(exception.code != 0)
             #expect(!exception.name.isEmpty)
-        case .connectionFailed, .socketIOFailed, .unexpectedEOF, .protocolError, .reconnectExhausted, .endpointsExhausted:
+        case .connectionFailed, .socketIOFailed, .unexpectedEOF, .protocolError, .reconnectExhausted, .endpointsExhausted, .queryTimeout:
             Issue.record("expected .queryFailed, got \(error)")
         }
 
@@ -340,7 +340,7 @@ struct ClickHouseFaultInjectionTests {
             return
         }
         switch error {
-        case .socketIOFailed, .unexpectedEOF, .protocolError, .reconnectExhausted, .connectionFailed:
+        case .socketIOFailed, .unexpectedEOF, .protocolError, .reconnectExhausted, .connectionFailed, .queryTimeout:
             break
         case .queryFailed, .endpointsExhausted:
             Issue.record("unexpected typed error for TCP RST: \(error)")

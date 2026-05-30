@@ -70,6 +70,21 @@
       "path": "Sources/DXClickHouse/Internal/Connection/ClickHouseConnection.swift",
       "rules": ["S002", "S011"],
       "reason": "POSIX socket transport for the ClickHouse Native protocol. getaddrinfo's C signature mandates inout UnsafeMutablePointer<addrinfo>? (third-party C API contract). Wire-protocol packet readers (receiveBlocks, receiveBlocksDrain, receiveBlocksExtractingStrings, drainBlockPacket, extractStringsBlockPacket, readBlockPacket, skipColumnPrefix, skipColumnBodyAfterPrefix, skipStringRows, splitMapInner, copyColumnBody, columnByteWidth, readProgressPacket, readUVarInt, skipServerHelloTail, openSocket, reconnect) are byte-level dispatch loops over ClickHouse Native packet types and column-type-name strings. Each function is already extracted to a single concern and further extraction would push the dispatch into deeper helpers without simplification."
+    },
+    {
+      "path": "Sources/DXClickHouse/Public/ReconnectionPolicy.swift",
+      "rules": ["S008"],
+      "reason": "ReconnectionPolicy is a value-type struct; ReconnectionPolicy.alwaysRetry, .failFast, .default, and .disabled produce independent copies at every reference and are the canonical Swift default-value idiom for `parameter: ReconnectionPolicy = .alwaysRetry`. The S008 spec itself notes that 'constants of value types that are not instances of the enclosing type' do not trip the rule by intent; the name-only check fires here for value-type defaults that are not singletons."
+    },
+    {
+      "path": "Sources/DXClickHouse/Public/ClickHouseClient+Timeout.swift",
+      "rules": ["S011"],
+      "reason": "scalarInternal, selectAllInternal, withTimeout, and injectMaxExecutionTime are all dispatch-shaped: each branch is a thin delegation or a single guard around a typed-error throw. The reported complexity comes from typed-error mapping in catch arms (catch as ClickHouseError vs. wrap into protocolError), which keeps the typed-throws SemVer contract on every call site without introducing helper indirection that would obscure the call site. Further extraction would push the bridging into deeper helpers without reducing entropy."
+    },
+    {
+      "path": "Sources/DXClickHouse/Public/ClickHouseService.swift",
+      "rules": ["S010"],
+      "reason": "swift-service-lifecycle's Service protocol mandates `func run() async throws` with untyped throws. Conforming actors must match that signature exactly. The typed-throws contract is therefore impossible on this single method; every other public throwing function on the service surface remains typed-throws."
     }
   ]
 }

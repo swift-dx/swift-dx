@@ -82,7 +82,11 @@ let package = Package(
         ),
         .target(
             name: "DXClickHouse",
-            dependencies: ["DXCore"],
+            dependencies: [
+                "DXCore",
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
+            ],
             plugins: integrityPlugins
         ),
         .testTarget(
@@ -131,7 +135,12 @@ let package = Package(
         ),
         .testTarget(
             name: "DXClickHouseIntegration",
-            dependencies: ["DXClickHouse", "DXCore"],
+            dependencies: [
+                "DXClickHouse",
+                "DXCore",
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
+            ],
             path: "IntegrationTests/DXClickHouseIntegration"
         ),
         .target(

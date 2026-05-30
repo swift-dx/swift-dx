@@ -38,6 +38,7 @@ struct ClickHouseErrorTypedThrowsTest {
             .queryFailed(serverException: Self.sampleException),
             .reconnectExhausted(attempts: 5),
             .endpointsExhausted(failures: [ClickHouseEndpointFailure(host: "h", port: 9000, reason: "refused")]),
+            .queryTimeout(elapsed: .milliseconds(100)),
         ]
         var observed: [String] = []
         for error in samples {
@@ -56,9 +57,11 @@ struct ClickHouseErrorTypedThrowsTest {
                 observed.append("reconnectExhausted:\(attempts)")
             case .endpointsExhausted(let failures):
                 observed.append("endpointsExhausted:\(failures.count)")
+            case .queryTimeout(let elapsed):
+                observed.append("queryTimeout:\(elapsed)")
             }
         }
-        #expect(observed.count == 7)
+        #expect(observed.count == 8)
         #expect(observed[0] == "connectionFailed:test")
         #expect(observed[1] == "socketIOFailed:send/32")
         #expect(observed[2] == "unexpectedEOF:16")
@@ -66,6 +69,7 @@ struct ClickHouseErrorTypedThrowsTest {
         #expect(observed[4] == "queryFailed:42/Syntax")
         #expect(observed[5] == "reconnectExhausted:5")
         #expect(observed[6] == "endpointsExhausted:1")
+        #expect(observed[7].hasPrefix("queryTimeout:"))
     }
 
     @Test("ClickHouseError is Equatable per case")
@@ -117,21 +121,45 @@ struct ClickHouseErrorTypedThrowsTest {
         switch observed {
         case .connectionFailed:
             break
-        case .socketIOFailed, .unexpectedEOF, .protocolError, .queryFailed, .reconnectExhausted, .endpointsExhausted:
+        case .socketIOFailed, .unexpectedEOF, .protocolError, .queryFailed, .reconnectExhausted, .endpointsExhausted, .queryTimeout:
             Issue.record("expected .connectionFailed, got \(observed)")
         }
     }
 
-    @Test("ReconnectionPolicy.default has 5 attempts, 100ms initial, 5s cap")
+    @Test("ReconnectionPolicy.default aliases alwaysRetry: unbounded attempts, 100ms initial, 5s cap")
     func defaultPolicyShape() {
         let policy = ReconnectionPolicy.default
-        #expect(policy.maxAttempts == 5)
+        #expect(policy.maxAttempts == ReconnectionPolicy.unboundedAttempts)
         #expect(policy.initialBackoff == .milliseconds(100))
         #expect(policy.maxBackoff == .seconds(5))
+        #expect(policy.backoffMultiplier == 2.0)
+        #expect(policy == ReconnectionPolicy.alwaysRetry)
     }
 
-    @Test("ReconnectionPolicy.disabled has 0 attempts")
-    func disabledPolicyShape() {
+    @Test("ReconnectionPolicy.alwaysRetry is the library default")
+    func alwaysRetryIsDefault() {
+        #expect(ReconnectionPolicy.alwaysRetry == ReconnectionPolicy.default)
+        #expect(ReconnectionPolicy.alwaysRetry.maxAttempts == .max)
+    }
+
+    @Test("ReconnectionPolicy.failFast and .disabled both surface zero attempts")
+    func failFastShape() {
+        #expect(ReconnectionPolicy.failFast.maxAttempts == 0)
         #expect(ReconnectionPolicy.disabled.maxAttempts == 0)
+        #expect(ReconnectionPolicy.disabled == ReconnectionPolicy.failFast)
+    }
+
+    @Test("ReconnectionPolicy.custom carries the supplied curve")
+    func customFactoryRoundTrips() {
+        let policy = ReconnectionPolicy.custom(
+            initial: .seconds(1),
+            max: .seconds(60),
+            multiplier: 3.0,
+            attempts: 7
+        )
+        #expect(policy.maxAttempts == 7)
+        #expect(policy.initialBackoff == .seconds(1))
+        #expect(policy.maxBackoff == .seconds(60))
+        #expect(policy.backoffMultiplier == 3.0)
     }
 }

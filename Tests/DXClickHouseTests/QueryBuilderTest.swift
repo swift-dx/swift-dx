@@ -58,7 +58,7 @@ struct ClickHouseQueryBuilderTest {
         switch caught {
         case .protocolError(let stage, _):
             #expect(stage == "settings")
-        case .connectionFailed, .socketIOFailed, .unexpectedEOF, .queryFailed, .reconnectExhausted, .endpointsExhausted:
+        case .connectionFailed, .socketIOFailed, .unexpectedEOF, .queryFailed, .reconnectExhausted, .endpointsExhausted, .queryTimeout:
             Issue.record("expected protocolError, got \(caught)")
         }
     }
@@ -83,7 +83,7 @@ struct ClickHouseQueryBuilderTest {
         switch caught {
         case .protocolError(let stage, _):
             #expect(stage == "parameters")
-        case .connectionFailed, .socketIOFailed, .unexpectedEOF, .queryFailed, .reconnectExhausted, .endpointsExhausted:
+        case .connectionFailed, .socketIOFailed, .unexpectedEOF, .queryFailed, .reconnectExhausted, .endpointsExhausted, .queryTimeout:
             Issue.record("expected protocolError, got \(caught)")
         }
     }

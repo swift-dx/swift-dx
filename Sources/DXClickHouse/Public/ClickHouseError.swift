@@ -29,6 +29,12 @@
 //   * endpointsExhausted     — pool tried every configured endpoint and
 //                              every connect attempt failed. Aggregated
 //                              per-endpoint failure reasons attached.
+//   * queryTimeout           — the per-query deadline supplied via the
+//                              `timeout:` parameter on a public operation
+//                              fired before the server finished. The
+//                              local side cancels the in-flight query
+//                              (Cancel packet best-effort) and surfaces
+//                              the elapsed Duration.
 public enum ClickHouseError: Error, Sendable, Equatable, CustomStringConvertible {
 
     case connectionFailed(reason: String)
@@ -38,6 +44,7 @@ public enum ClickHouseError: Error, Sendable, Equatable, CustomStringConvertible
     case queryFailed(serverException: ClickHouseServerException)
     case reconnectExhausted(attempts: Int)
     case endpointsExhausted(failures: [ClickHouseEndpointFailure])
+    case queryTimeout(elapsed: Duration)
 
     public var description: String {
         switch self {
@@ -55,6 +62,8 @@ public enum ClickHouseError: Error, Sendable, Equatable, CustomStringConvertible
             "reconnect exhausted after \(attempts) attempts"
         case .endpointsExhausted(let failures):
             "every endpoint failed: \(failures.map { $0.description }.joined(separator: "; "))"
+        case .queryTimeout(let elapsed):
+            "query timed out after \(elapsed)"
         }
     }
 }

@@ -87,7 +87,7 @@ struct ClickHouseOperationsIntegration {
         switch caught {
         case .queryFailed(let exception):
             #expect(exception.code != 0)
-        case .connectionFailed, .socketIOFailed, .unexpectedEOF, .protocolError, .reconnectExhausted, .endpointsExhausted:
+        case .connectionFailed, .socketIOFailed, .unexpectedEOF, .protocolError, .reconnectExhausted, .endpointsExhausted, .queryTimeout:
             Issue.record("expected queryFailed, got \(caught)")
         }
     }
@@ -133,7 +133,7 @@ struct ClickHouseOperationsIntegration {
             #expect(exception.code != 0)
             #expect(!exception.name.isEmpty)
             #expect(!exception.message.isEmpty)
-        case .connectionFailed, .socketIOFailed, .unexpectedEOF, .protocolError, .reconnectExhausted, .endpointsExhausted:
+        case .connectionFailed, .socketIOFailed, .unexpectedEOF, .protocolError, .reconnectExhausted, .endpointsExhausted, .queryTimeout:
             Issue.record("expected queryFailed with server exception, got \(caught)")
         }
     }

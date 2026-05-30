@@ -428,7 +428,7 @@ enum StabilityFault {
             return ScenarioResult(id: "F6_mid_receive_tcp_rst", passed: false, detail: "drain succeeded; expected RST-induced typed error")
         }
         switch error {
-        case .socketIOFailed, .unexpectedEOF, .protocolError, .reconnectExhausted, .connectionFailed, .endpointsExhausted:
+        case .socketIOFailed, .unexpectedEOF, .protocolError, .reconnectExhausted, .connectionFailed, .endpointsExhausted, .queryTimeout:
             break
         case .queryFailed:
             return ScenarioResult(id: "F6_mid_receive_tcp_rst", passed: false, detail: "unexpected .queryFailed for TCP RST")
