@@ -19,6 +19,7 @@ let package = Package(
     ],
     dependencies: [
         .package(path: ".."),
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.100.0"),
     ],
     targets: [
         .executableTarget(
@@ -27,6 +28,23 @@ let package = Package(
                 .product(name: "DXJetStream", package: "swift-dx"),
             ],
             path: "Sources/JetStream",
+            swiftSettings: [
+                .unsafeFlags(
+                    [
+                        "-enforce-exclusivity=unchecked",
+                        "-cross-module-optimization",
+                    ],
+                    .when(configuration: .release)
+                ),
+            ]
+        ),
+        .executableTarget(
+            name: "ClickHouseBenchmark",
+            dependencies: [
+                .product(name: "DXClickHouse", package: "swift-dx"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+            ],
+            path: "Sources/ClickHouse",
             swiftSettings: [
                 .unsafeFlags(
                     [

@@ -23,6 +23,9 @@
     "DXCoreTests": "default",
     "DXJetStreamTests": "default",
     "DXJetStreamIntegration": "default",
+    "DXClickHouse": "default",
+    "DXClickHouseTests": "default",
+    "DXClickHouseIntegration": "default",
     "DXJSONSchema": "default",
     "DXJSONSchemaTests": "default",
     "DXJSONSchemaComplianceTests": "default"
@@ -42,6 +45,26 @@
       "path": "Tests/DXJetStreamTests/CapturingLogHandler.swift",
       "rules": ["S002"],
       "reason": "swift-log's LogHandler protocol mandates a subscript returning Logger.Metadata.Value? and a log(...) method taking metadata: Logger.Metadata?. Both Optional surfaces are required by the third-party protocol."
+    },
+    {
+      "path": "Sources/DXClickHouse/Public/ClickHouseNullable.swift",
+      "rules": ["S002"],
+      "reason": "Intentional bridge to Swift's Optional for test-construction ergonomics and Foundation Codable interop at system boundaries. The internal storage is the typed ClickHouseNullable enum; this Optional surface is the one-way conversion accessor."
+    },
+    {
+      "path": "Sources/DXClickHouse/Internal/Native/Codable/ClickHouseRowKeyedContainer.swift",
+      "rules": ["S002"],
+      "reason": "Foundation Codable's KeyedEncodingContainerProtocol mandates encodeIfPresent(_:forKey:) take T?. The Optional is bridged to ClickHouseNullable at the protocol boundary."
+    },
+    {
+      "path": "Sources/DXClickHouse/Internal/Native/Codable/ClickHouseRowKeyedDecodingContainer.swift",
+      "rules": ["S002"],
+      "reason": "Foundation Codable's KeyedDecodingContainerProtocol provides decodeIfPresent(_:forKey:) which returns T?. The Optional is bridged from ClickHouseNullable at the protocol boundary."
+    },
+    {
+      "path": "Sources/DXClickHouse/Internal/Native/ClickHouseRowSequence.swift",
+      "rules": ["S002"],
+      "reason": "Swift's AsyncIteratorProtocol mandates next() return Element? where nil signals end-of-sequence. The Optional is the language-level termination contract of the protocol witness, not a domain Optional. The internal block buffer holds non-optional rows."
     }
   ]
 }
