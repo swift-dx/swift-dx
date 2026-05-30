@@ -253,11 +253,8 @@ struct ClickHouseFaultInjectionTests {
         do {
             try await connection.sendQuery("SELECT not_a_real_column FROM not_a_real_table_for_raw_stability")
             _ = try await connection.drainBlocks()
-        } catch let error as ClickHouseError {
-            captured = error
         } catch {
-            Issue.record("expected typed ClickHouseError for server-side error, got \(error)")
-            return
+            captured = error
         }
         guard let error = captured else {
             Issue.record("malformed SQL succeeded; expected queryFailed")
@@ -322,19 +319,15 @@ struct ClickHouseFaultInjectionTests {
         }
 
         var captured: ClickHouseError?
-        var untyped: String?
         do {
             try await connection.sendQuery("SELECT number, toString(number) AS payload FROM numbers(5000000)")
             _ = try await connection.drainBlocks()
-        } catch let error as ClickHouseError {
-            captured = error
         } catch {
-            untyped = String(describing: error)
+            captured = error
         }
         _ = await resetter.value
         await connection.close()
 
-        #expect(untyped == nil, "expected typed ClickHouseError for TCP RST, got \(untyped ?? "")")
         guard let error = captured else {
             Issue.record("drain succeeded; expected RST-induced typed error")
             return
