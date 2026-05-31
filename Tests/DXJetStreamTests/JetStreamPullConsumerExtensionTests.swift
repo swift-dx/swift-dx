@@ -92,6 +92,24 @@ struct JetStreamPullConsumerExtensionTests {
     }
 
     @Test
+    func ackTypeMethods_dispatchThroughConsumerSurface() {
+        let mock = MockPullConsumer(messages: [], error: .none)
+        let message = NatsMessage(subject: "orders.created.1", sid: 1, reply: .subject("$JS.ACK.s.c.1"), headers: [], payload: [], status: .ok)
+
+        mock.nak(message)
+        mock.nak(message, delay: .seconds(5))
+        mock.term(message)
+        mock.term(message, reason: "poison message")
+        mock.inProgress(message)
+
+        #expect(mock.nakedSubjects == ["orders.created.1", "orders.created.1"])
+        #expect(mock.nakDelays == [.seconds(5)])
+        #expect(mock.termedSubjects == ["orders.created.1", "orders.created.1"])
+        #expect(mock.termReasons == ["poison message"])
+        #expect(mock.inProgressSubjects == ["orders.created.1"])
+    }
+
+    @Test
     func asyncStreamConvenience_withDefaultOptions_yieldsMessages() async throws {
         let stream = try StreamName("ORDERS")
         let consumer = try ConsumerName("workers")
@@ -156,8 +174,36 @@ private final class MockPullConsumer: JetStreamPullConsumer, @unchecked Sendable
         }
     }
 
+    private(set) var nakedSubjects: [String] = []
+    private(set) var nakDelays: [TimeSpan] = []
+    private(set) var termedSubjects: [String] = []
+    private(set) var termReasons: [String] = []
+    private(set) var inProgressSubjects: [String] = []
+
     func ack(_ message: NatsMessage) {}
     func acknowledge(replies: [[UInt8]]) {}
+
+    func nak(_ message: NatsMessage) {
+        nakedSubjects.append(message.subject)
+    }
+
+    func nak(_ message: NatsMessage, delay: TimeSpan) {
+        nakedSubjects.append(message.subject)
+        nakDelays.append(delay)
+    }
+
+    func term(_ message: NatsMessage) {
+        termedSubjects.append(message.subject)
+    }
+
+    func term(_ message: NatsMessage, reason: String) {
+        termedSubjects.append(message.subject)
+        termReasons.append(reason)
+    }
+
+    func inProgress(_ message: NatsMessage) {
+        inProgressSubjects.append(message.subject)
+    }
 }
 
 private final class RecordingMessageHandler: DXMessageHandler, @unchecked Sendable {

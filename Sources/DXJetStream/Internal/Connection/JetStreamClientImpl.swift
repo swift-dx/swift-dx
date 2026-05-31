@@ -347,6 +347,46 @@ final class JetStreamClientImpl: JetStreamClient, JetStreamConnection, Service {
         writeBufNonBlocking(buf)
     }
 
+    func nak(_ message: NatsMessage) {
+        guard case .reply(let reply) = ackTarget(of: message) else { return }
+        writeBytesNonBlocking(FrameBuilder.buildNak(reply: reply))
+    }
+
+    func nak(_ message: NatsMessage, delay: TimeSpan) {
+        guard case .reply(let reply) = ackTarget(of: message) else { return }
+        writeBytesNonBlocking(FrameBuilder.buildNak(reply: reply, delayNanoseconds: delay.nanoseconds))
+    }
+
+    func term(_ message: NatsMessage) {
+        guard case .reply(let reply) = ackTarget(of: message) else { return }
+        writeBytesNonBlocking(FrameBuilder.buildTerm(reply: reply))
+    }
+
+    func term(_ message: NatsMessage, reason: String) {
+        guard case .reply(let reply) = ackTarget(of: message) else { return }
+        writeBytesNonBlocking(FrameBuilder.buildTerm(reply: reply, reason: reason))
+    }
+
+    func inProgress(_ message: NatsMessage) {
+        guard case .reply(let reply) = ackTarget(of: message) else { return }
+        writeBytesNonBlocking(FrameBuilder.buildInProgress(reply: reply))
+    }
+
+    private func ackTarget(of message: NatsMessage) -> AckTarget {
+        switch message.reply {
+        case .none:
+            return .skip
+        case .subject(let replySubject):
+            return .reply(Array(replySubject.utf8))
+        }
+    }
+
+    private enum AckTarget {
+
+        case skip
+        case reply([UInt8])
+    }
+
     func request(at subject: Subject, payload: [UInt8]) async throws(JetStreamError) -> NatsMessage {
         let id = counter.wrappingIncrementThenLoad(ordering: .relaxed)
         let reply = "\(inboxPrefix).\(String(id, radix: 36))"

@@ -43,6 +43,11 @@ final class RecordingClientMock: JetStreamClient, @unchecked Sendable {
     func messages(from stream: StreamName, for consumer: ConsumerName, options: PullOptions) -> AsyncThrowingStream<NatsMessage, any Error> { fatalError("not used in this example") }
     func ack(_ message: NatsMessage) {}
     func acknowledge(replies: [[UInt8]]) {}
+    func nak(_ message: NatsMessage) {}
+    func nak(_ message: NatsMessage, delay: TimeSpan) {}
+    func term(_ message: NatsMessage) {}
+    func term(_ message: NatsMessage, reason: String) {}
+    func inProgress(_ message: NatsMessage) {}
     func request(at subject: Subject, payload: [UInt8]) async throws(JetStreamError) -> NatsMessage { fatalError("not used in this example") }
     func ensure(_ stream: StreamName, subject: Subject, storage: StorageMode) async throws(JetStreamError) {}
     func delete(_ stream: StreamName) async throws(JetStreamError) {}

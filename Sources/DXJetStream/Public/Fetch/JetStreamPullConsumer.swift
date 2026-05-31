@@ -18,6 +18,11 @@ public protocol JetStreamPullConsumer: Sendable {
     func messages(from stream: StreamName, for consumer: ConsumerName, options: PullOptions) -> AsyncThrowingStream<NatsMessage, any Error>
     func ack(_ message: NatsMessage)
     func acknowledge(replies: [[UInt8]])
+    func nak(_ message: NatsMessage)
+    func nak(_ message: NatsMessage, delay: TimeSpan)
+    func term(_ message: NatsMessage)
+    func term(_ message: NatsMessage, reason: String)
+    func inProgress(_ message: NatsMessage)
 }
 
 extension JetStreamPullConsumer {

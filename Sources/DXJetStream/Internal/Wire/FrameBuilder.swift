@@ -308,6 +308,44 @@ enum FrameBuilder {
         return buf
     }
 
+    static func buildNak(reply: [UInt8]) -> [UInt8] {
+        buildAckResponse(reply: reply, body: nakToken)
+    }
+
+    static func buildNak(reply: [UInt8], delayNanoseconds: Int64) -> [UInt8] {
+        var body = nakToken
+        body.append(contentsOf: Array(" {\"delay\":\(delayNanoseconds)}".utf8))
+        return buildAckResponse(reply: reply, body: body)
+    }
+
+    static func buildTerm(reply: [UInt8]) -> [UInt8] {
+        buildAckResponse(reply: reply, body: termToken)
+    }
+
+    static func buildTerm(reply: [UInt8], reason: String) -> [UInt8] {
+        var body = termToken
+        body.append(Ascii.space)
+        body.append(contentsOf: Array(reason.utf8))
+        return buildAckResponse(reply: reply, body: body)
+    }
+
+    static func buildInProgress(reply: [UInt8]) -> [UInt8] {
+        buildAckResponse(reply: reply, body: inProgressToken)
+    }
+
+    private static func buildAckResponse(reply: [UInt8], body: [UInt8]) -> [UInt8] {
+        var frame: [UInt8] = []
+        frame.reserveCapacity(pubOp.count &+ reply.count &+ 1 &+ maxDecimalDigitsUInt64 &+ 2 &+ body.count &+ 2)
+        frame.append(contentsOf: pubOp)
+        frame.append(contentsOf: reply)
+        frame.append(Ascii.space)
+        frame.append(contentsOf: Array(String(body.count).utf8))
+        frame.append(contentsOf: NatsProtocolBytes.crlf)
+        frame.append(contentsOf: body)
+        frame.append(contentsOf: NatsProtocolBytes.crlf)
+        return frame
+    }
+
     static func buildAnonymousConnect() -> [UInt8] {
         let connect = #"CONNECT {"verbose":false,"pedantic":false,"tls_required":false,"lang":"swift-dx","version":"0.1","protocol":1,"headers":true,"no_responders":true}"#
         var bytes = Array(connect.utf8)
@@ -334,6 +372,10 @@ enum FrameBuilder {
         Ascii.plus, Ascii.upperA, Ascii.upperC, Ascii.upperK,
         Ascii.carriageReturn, Ascii.lineFeed,
     ]
+
+    private static let nakToken: [UInt8] = Array("-NAK".utf8)
+    private static let termToken: [UInt8] = Array("+TERM".utf8)
+    private static let inProgressToken: [UInt8] = Array("+WPI".utf8)
 
     @inline(__always)
     private static func makeLinePrefix(op: [UInt8], subject: String, inboxPrefixBytes: [UInt8]) -> [UInt8] {
