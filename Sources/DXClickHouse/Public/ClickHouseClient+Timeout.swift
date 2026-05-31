@@ -120,10 +120,11 @@ extension ClickHouseClient {
     public func insert<T: Encodable & Sendable>(
         into table: String,
         rows: [T],
-        timeout: Duration = ClickHouseQueryDefaults.insertTimeout
+        timeout: Duration = ClickHouseQueryDefaults.insertTimeout,
+        settings: ClickHouseQuerySettings = .empty
     ) async throws(ClickHouseError) -> ClickHouseInsertSummary {
         try await Self.withTimeout(self, timeout: timeout) {
-            try await self.insertInternal(into: table, rows: rows)
+            try await self.insertInternal(into: table, rows: rows, settings: settings)
         }
     }
 
@@ -131,13 +132,15 @@ extension ClickHouseClient {
         into table: String,
         columnList: String,
         nativeBlockBytes: [UInt8],
-        timeout: Duration = ClickHouseQueryDefaults.insertTimeout
+        timeout: Duration = ClickHouseQueryDefaults.insertTimeout,
+        settings: ClickHouseQuerySettings = .empty
     ) async throws(ClickHouseError) -> ClickHouseInsertSummary {
         try await Self.withTimeout(self, timeout: timeout) {
             try await self.insertNativeBlockInternal(
                 table: table,
                 columnList: columnList,
-                nativeBlockBytes: nativeBlockBytes
+                nativeBlockBytes: nativeBlockBytes,
+                settings: settings
             )
         }
     }
@@ -241,20 +244,23 @@ extension ClickHouseClient {
 
     nonisolated func insertInternal<T: Encodable & Sendable>(
         into table: String,
-        rows: [T]
+        rows: [T],
+        settings: ClickHouseQuerySettings
     ) async throws(ClickHouseError) -> ClickHouseInsertSummary {
-        try await self.insertCore(into: table, rows: rows)
+        try await self.insertCore(into: table, rows: rows, settings: settings)
     }
 
     nonisolated func insertNativeBlockInternal(
         table: String,
         columnList: String,
-        nativeBlockBytes: [UInt8]
+        nativeBlockBytes: [UInt8],
+        settings: ClickHouseQuerySettings
     ) async throws(ClickHouseError) -> ClickHouseInsertSummary {
         try await self.insertNativeBlockCore(
             into: table,
             columnList: columnList,
-            nativeBlockBytes: nativeBlockBytes
+            nativeBlockBytes: nativeBlockBytes,
+            settings: settings
         )
     }
 

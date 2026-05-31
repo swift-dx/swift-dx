@@ -39,3 +39,15 @@ public struct ClickHouseQuerySetting: Sendable, Equatable {
         self.obsolete = obsolete
     }
 }
+
+extension ClickHouseQuerySetting {
+
+    // Idempotency key for an INSERT. ClickHouse drops a block whose token
+    // matches one already inserted into the same table, so retrying an
+    // INSERT after an ambiguous failure cannot double-write. Sent with the
+    // `important` flag so the server rejects the query rather than silently
+    // ignoring the token on an engine that does not support deduplication.
+    public static func insertDeduplicationToken(_ token: String) -> ClickHouseQuerySetting {
+        ClickHouseQuerySetting(name: "insert_deduplication_token", value: token)
+    }
+}

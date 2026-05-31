@@ -168,6 +168,37 @@ struct ClickHouseQueryBuilderTest {
     }
 }
 
+@Suite("ClickHouseQuerySetting insert deduplication token")
+struct ClickHouseInsertDeduplicationTokenTest {
+
+    @Test("insertDeduplicationToken builds the named setting with the important flag")
+    func factoryBuildsImportantSetting() {
+        let setting = ClickHouseQuerySetting.insertDeduplicationToken("batch-2026-001")
+        #expect(setting.name == "insert_deduplication_token")
+        #expect(setting.value == "batch-2026-001")
+        #expect(setting.important)
+        #expect(!setting.custom)
+        #expect(!setting.obsolete)
+    }
+
+    @Test("an INSERT query carries the dedup token in the settings block")
+    func insertQueryEncodesDeduplicationToken() throws {
+        let settings = ClickHouseQuerySettings([
+            .insertDeduplicationToken("batch-2026-001"),
+        ])
+        let bytes = try ClickHouseQueryBuilder.buildQuery(
+            "INSERT INTO orders (`id`) FORMAT Native",
+            queryID: "",
+            settings: settings,
+            parameters: .empty,
+            revision: ClickHouseQueryBuilder.revision
+        )
+        let text = String(decoding: bytes, as: UTF8.self)
+        #expect(text.contains("insert_deduplication_token"))
+        #expect(text.contains("batch-2026-001"))
+    }
+}
+
 @Suite("ClickHouseProgress and ClickHouseProfileInfo equality")
 struct ClickHouseProgressTest {
 

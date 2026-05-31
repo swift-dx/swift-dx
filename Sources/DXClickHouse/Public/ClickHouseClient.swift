@@ -132,7 +132,8 @@ public final actor ClickHouseClient {
 
     func insertCore<T: Encodable & Sendable>(
         into table: String,
-        rows: [T]
+        rows: [T],
+        settings: ClickHouseQuerySettings
     ) async throws(ClickHouseError) -> ClickHouseInsertSummary {
         if rows.isEmpty {
             return ClickHouseInsertSummary(rowsSent: 0, blocksSent: 0, writtenRows: 0, writtenBytes: 0)
@@ -145,7 +146,7 @@ public final actor ClickHouseClient {
         let dataPacket = try ClickHouseBlockWriter.encodeDataPacket(columns: columns, revision: revision)
         let terminator = ClickHouseBlockWriter.encodeEmptyDataPacket()
         let writtenCounters = try await runOnWorker { (transport: ClientTransportBox) throws(ClickHouseError) -> (UInt64, UInt64) in
-            try transport.connection.sendQuery(sampleQuery)
+            try transport.connection.sendQuery(sampleQuery, queryID: "", settings: settings, parameters: .empty)
             let schema = try transport.connection.receiveInsertSampleSchema()
             try Self.validateInsertSchema(declared: columns, sampleSchema: schema)
             try transport.connection.sendRawBytes(dataPacket)
@@ -163,11 +164,12 @@ public final actor ClickHouseClient {
     func insertNativeBlockCore(
         into table: String,
         columnList: String,
-        nativeBlockBytes: [UInt8]
+        nativeBlockBytes: [UInt8],
+        settings: ClickHouseQuerySettings
     ) async throws(ClickHouseError) -> ClickHouseInsertSummary {
         let terminator = ClickHouseBlockWriter.encodeEmptyDataPacket()
         let writtenCounters = try await runOnWorker { (transport: ClientTransportBox) throws(ClickHouseError) -> (UInt64, UInt64) in
-            try transport.connection.sendQuery("INSERT INTO \(table) \(columnList) FORMAT Native")
+            try transport.connection.sendQuery("INSERT INTO \(table) \(columnList) FORMAT Native", queryID: "", settings: settings, parameters: .empty)
             _ = try transport.connection.receiveInsertSampleSchema()
             try transport.connection.sendRawBytes(nativeBlockBytes)
             try transport.connection.sendRawBytes(terminator)

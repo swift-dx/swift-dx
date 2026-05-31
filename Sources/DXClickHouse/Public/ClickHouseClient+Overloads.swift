@@ -100,28 +100,31 @@ extension ClickHouseClient {
     public func insert<S: Sequence & Sendable>(
         into table: String,
         rows: S,
-        timeout: Duration = ClickHouseQueryDefaults.insertTimeout
+        timeout: Duration = ClickHouseQueryDefaults.insertTimeout,
+        settings: ClickHouseQuerySettings = .empty
     ) async throws(ClickHouseError) -> ClickHouseInsertSummary where S.Element: Encodable & Sendable {
-        try await insert(into: table, rows: Array(rows), timeout: timeout)
+        try await insert(into: table, rows: Array(rows), timeout: timeout, settings: settings)
     }
 
     public func insert<Source: AsyncSequence & Sendable, Row: Encodable & Sendable>(
         into table: String,
         rows: Source,
-        timeout: Duration = ClickHouseQueryDefaults.insertTimeout
+        timeout: Duration = ClickHouseQueryDefaults.insertTimeout,
+        settings: ClickHouseQuerySettings = .empty
     ) async throws(ClickHouseError) -> ClickHouseInsertSummary where Source.Element == Row {
         let collected: [Row] = try await Self.materialise(rows: rows)
-        return try await insert(into: table, rows: collected, timeout: timeout)
+        return try await insert(into: table, rows: collected, timeout: timeout, settings: settings)
     }
 
     public nonisolated func insert<T: Encodable & Sendable>(
         into table: String,
         rows: [T],
+        settings: ClickHouseQuerySettings = .empty,
         completion: @escaping DXCallback<ClickHouseInsertSummary, ClickHouseError>
     ) {
         Task { [self] in
             do {
-                let summary = try await self.insert(into: table, rows: rows)
+                let summary = try await self.insert(into: table, rows: rows, settings: settings)
                 completion(.success(summary))
             } catch let error as ClickHouseError {
                 completion(.failure(error))
