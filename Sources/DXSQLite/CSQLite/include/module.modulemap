@@ -1,0 +1,4 @@
+module CSQLite {
+    header "dx_sqlite_shims.h"
+    export *
+}

@@ -43,6 +43,13 @@ let package = Package(
             ],
             path: "Sources/Redis/QuickStart"
         ),
+        .executableTarget(
+            name: "SQLiteQuickStart",
+            dependencies: [
+                .product(name: "DXSQLite", package: "swift-dx"),
+            ],
+            path: "Sources/SQLite/QuickStart"
+        ),
     ],
     swiftLanguageModes: [.v6]
 )

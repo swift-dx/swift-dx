@@ -23,73 +23,258 @@
     "DXCoreTests": "default",
     "DXJetStreamTests": "default",
     "DXJetStreamIntegration": "default",
+    "DXPostgres": "default",
+    "DXPostgresTests": "default",
+    "DXPostgresIntegration": "default",
+    "DXPostgresPublicAPITests": "default",
     "DXClickHouse": "default",
     "DXClickHouseTests": [],
     "DXClickHouseIntegration": [],
     "DXJSONSchema": "default",
     "DXJSONSchemaTests": "default",
-    "DXJSONSchemaComplianceTests": "default"
+    "DXJSONSchemaComplianceTests": "default",
+    "CSQLite": [],
+    "DXSQLite": "default",
+    "DXSQLiteTests": "default",
+    "DXSQLitePublicAPITests": "default"
   },
   "exemptions": [
     {
+      "path": "Sources/DXPostgres/Internal/Types/PostgresIntervalText.swift",
+      "rules": [
+        "S011"
+      ],
+      "reason": "applyUnit dispatches on the interval unit word (year/mon/day/hour/min/sec, each with plural and abbreviated spellings) to the matching component of months/days/microseconds. It is the grammar table for PostgreSQL's interval text output; each branch is a single accumulation."
+    },
+    {
+      "path": "Tests/DXPostgresPublicAPITests/PublicSurfaceTests.swift",
+      "rules": [
+        "S011"
+      ],
+      "reason": "describe and name exhaustively switch over every case of the public PostgresError and PostgresDataType enums. The exhaustive match is the point of this target: it is the breaking-change tripwire that stops compiling when a public enum case is added or removed, so each switch lists every case and is intentionally as wide as the enum."
+    },
+    {
+      "path": "IntegrationTests/DXPostgresIntegration/PostgresRowDecoderIntegrationTests.swift",
+      "rules": [
+        "S002"
+      ],
+      "reason": "A test fixture struct declares an optional property to verify that the row-to-struct Decodable mapping maps a SQL NULL column to nil through Codable's decodeIfPresent. The optional is the behavior under test (Codable optional support), not a design choice in library code."
+    },
+    {
+      "path": "Sources/DXSQLite/DXSQLite/Connection/SQLiteConnection.swift",
+      "rules": [
+        "S002"
+      ],
+      "reason": "sqlite3_open_v2 and sqlite3_prepare_v2 take sqlite3** / sqlite3_stmt** out-parameters, imported by Swift as UnsafeMutablePointer<OpaquePointer?>. The local OpaquePointer? is mandated by the C out-parameter contract; it is bound to a non-optional via guard let on the next line and never escapes the function."
+    },
+    {
+      "path": "Sources/DXSQLite/DXSQLite/Database/SQLiteDatabase+Service.swift",
+      "rules": [
+        "S010"
+      ],
+      "reason": "swift-service-lifecycle's Service protocol mandates `func run() async throws` with untyped throws. Conforming types must match that signature exactly. The typed-throws contract is therefore impossible on this single method; every other public throwing function on the database surface remains typed-throws."
+    },
+    {
+      "path": "Sources/DXSQLite/DXSQLite/Functions/SQLiteFunctionRegistration.swift",
+      "rules": [
+        "S002"
+      ],
+      "reason": "The @convention(c) callback thunks SQLite invokes (xFunc, xDestroy) and the sqlite3_value* / sqlite3_context* arguments are imported by Swift as Optional pointers (OpaquePointer?, UnsafeMutablePointer<OpaquePointer?>?, UnsafeMutableRawPointer?). These Optionals are mandated by the C trampoline contract; each is bound via guard let before use and never surfaces on the public API."
+    },
+    {
+      "path": "Sources/DXSQLite/DXSQLite/Functions/SQLiteAggregateRegistration.swift",
+      "rules": [
+        "S002"
+      ],
+      "reason": "The @convention(c) aggregate thunks SQLite invokes (xStep, xFinal, xDestroy) and the sqlite3_context* / sqlite3_value* arguments are imported by Swift as Optional pointers. These Optionals are mandated by the C trampoline contract; each is bound via guard let before use and never surfaces on the public API."
+    },
+    {
+      "path": "Sources/DXSQLite/DXSQLite/Functions/SQLiteCollationRegistration.swift",
+      "rules": [
+        "S002"
+      ],
+      "reason": "The @convention(c) collation comparator and destroy thunks SQLite invokes take void* / const void* key buffers imported by Swift as Optional pointers (UnsafeMutableRawPointer?, UnsafeRawPointer?). These Optionals are mandated by the C trampoline contract; each is bound via guard let before use and never surfaces on the public API."
+    },
+    {
+      "path": "Sources/DXSQLite/DXSQLite/Hooks/SQLiteHookRegistration.swift",
+      "rules": [
+        "S002"
+      ],
+      "reason": "The @convention(c) update/commit/rollback hook thunks SQLite invokes take void* user-data and const char* name pointers imported by Swift as Optional pointers (UnsafeMutableRawPointer?, UnsafePointer<CChar>?). These Optionals are mandated by the C callback contract; each is bound via guard let before use and never surfaces on the public API."
+    },
+    {
+      "path": "Sources/DXSQLite/DXSQLite/Hooks/SQLiteObserverRegistration.swift",
+      "rules": [
+        "S002"
+      ],
+      "reason": "The @convention(c) trace/busy/progress observer thunks SQLite invokes take void* user-data and void* detail pointers imported by Swift as Optional pointers (UnsafeMutableRawPointer?). These Optionals are mandated by the C callback contract; each is bound via guard let before use and never surfaces on the public API."
+    },
+    {
+      "path": "Sources/DXSQLite/DXSQLite/Session/SQLiteSessionRegistration.swift",
+      "rules": [
+        "S002"
+      ],
+      "reason": "The @convention(c) changeset xConflict callback SQLite invokes takes void* context and sqlite3_changeset_iter* pointers imported by Swift as Optional pointers (UnsafeMutableRawPointer?, OpaquePointer?). These Optionals are mandated by the C callback contract and never surface on the public API."
+    },
+    {
       "path": "Sources/DXJetStream/Internal/Tracing/TracePropagation.swift",
-      "rules": ["S002"],
+      "rules": [
+        "S002"
+      ],
       "reason": "The Extractor protocol from swift-distributed-tracing requires extract(key:from:) -> String?. The Optional return is mandated by the third-party protocol contract."
     },
     {
       "path": "IntegrationTests/DXJetStreamIntegration/TracingIntegrationTests.swift",
-      "rules": ["S002"],
+      "rules": [
+        "S002"
+      ],
       "reason": "The integration test conforms a test fixture to swift-distributed-tracing's Extractor protocol (extract(key:from:) -> String?) and uses ServiceContext's custom-key subscript which is Optional by API contract. Both are third-party-protocol constraints."
     },
     {
       "path": "Tests/DXJetStreamTests/CapturingLogHandler.swift",
-      "rules": ["S002"],
+      "rules": [
+        "S002"
+      ],
       "reason": "swift-log's LogHandler protocol mandates a subscript returning Logger.Metadata.Value? and a log(...) method taking metadata: Logger.Metadata?. Both Optional surfaces are required by the third-party protocol."
     },
     {
       "path": "Sources/DXClickHouse/Internal/Codable/ClickHouseColumnarKeyedDecodingContainer.swift",
-      "rules": ["S002", "S007", "S011"],
+      "rules": [
+        "S002",
+        "S007",
+        "S011"
+      ],
       "reason": "Foundation's KeyedDecodingContainerProtocol mandates decodeIfPresent(_:forKey:) -> T? returns for every primitive plus the generic Decodable overload. The generic decode<T: Decodable>(_ type: T.Type, forKey:) -> T overload performs runtime type-equality dispatch where 'as! T' is the only Swift surface that can convert the typed result back to the generic parameter. The dispatch switch over Swift primitive types (Bool, String, Date, UUID, 10 integer widths) gives cyclomatic complexity 15 and cannot be reduced without abandoning the Codable contract."
     },
     {
       "path": "Sources/DXClickHouse/Internal/Codable/ClickHouseRowKeyedContainer.swift",
-      "rules": ["S002"],
-      "reason": "Foundation's KeyedEncodingContainerProtocol mandates encodeIfPresent(_ value: T?, forKey:) for every primitive and the generic Encodable overload. The Wrapped? parameter on the toNullable helper is the direct shape of the protocol's mandated input. These Optional surfaces are required by the third-party Codable contract."
+      "rules": [
+        "S002",
+        "S011"
+      ],
+      "reason": "Foundation's KeyedEncodingContainerProtocol mandates encodeIfPresent(_ value: T?, forKey:) for every primitive and the generic Encodable overload. The Wrapped? parameter on the toNullable helper is the direct shape of the protocol's mandated input. These Optional surfaces are required by the third-party Codable contract. The generic encode<T: Encodable>(_:forKey:) overload performs runtime value-type dispatch (value as? Date / UUID / the ClickHouse column wrapper types) where each branch routes one Foundation or wrapper type to its typed accumulator; this is the encode-side mirror of the exempted decode<T> dispatch in ClickHouseColumnarKeyedDecodingContainer and cannot be reduced without abandoning the Codable contract."
     },
     {
       "path": "Sources/DXClickHouse/Internal/Codable/ClickHouseCodableDecoder.swift",
-      "rules": ["S011"],
+      "rules": [
+        "S011"
+      ],
       "reason": "parseNonNullColumn dispatches on the wire-format ClickHouse type-name string (server emits these as String literals, e.g. 'Int32', 'String', 'UUID'). The exhaustive switch covers 20+ ClickHouse scalar types; each branch lifts that type's bytes into the matching typed buffer. Splitting per-type into separate files would explode the codebase without improving readability."
     },
     {
       "path": "Sources/DXClickHouse/Internal/Codable/ClickHouseBlockWriter.swift",
-      "rules": ["S011"],
+      "rules": [
+        "S011"
+      ],
       "reason": "writeColumnBody dispatches on the ClickHouseTypedColumn enum (exhaustive switch over the supported wire-format types). The dispatch is an enum-exhaustive switch where each branch emits the column body for one ClickHouse type to the wire-format writer. Each branch is a small typed-write call; the file already separates wire-format helpers from the dispatcher."
     },
     {
       "path": "Sources/DXClickHouse/Internal/Connection/ClickHouseConnection.swift",
-      "rules": ["S002", "S011"],
+      "rules": [
+        "S002",
+        "S011"
+      ],
       "reason": "POSIX socket transport for the ClickHouse Native protocol. getaddrinfo's C signature mandates inout UnsafeMutablePointer<addrinfo>? (third-party C API contract). Wire-protocol packet readers (receiveBlocks, receiveBlocksDrain, receiveBlocksExtractingStrings, drainBlockPacket, extractStringsBlockPacket, readBlockPacket, skipColumnPrefix, skipColumnBodyAfterPrefix, skipStringRows, splitMapInner, copyColumnBody, columnByteWidth, readProgressPacket, readUVarInt, skipServerHelloTail, openSocket, reconnect) are byte-level dispatch loops over ClickHouse Native packet types and column-type-name strings. Each function is already extracted to a single concern and further extraction would push the dispatch into deeper helpers without simplification."
     },
     {
       "path": "Sources/DXClickHouse/Public/ReconnectionPolicy.swift",
-      "rules": ["S008"],
+      "rules": [
+        "S008"
+      ],
       "reason": "ReconnectionPolicy is a value-type struct; ReconnectionPolicy.alwaysRetry, .failFast, .default, and .disabled produce independent copies at every reference and are the canonical Swift default-value idiom for `parameter: ReconnectionPolicy = .alwaysRetry`. The S008 spec itself notes that 'constants of value types that are not instances of the enclosing type' do not trip the rule by intent; the name-only check fires here for value-type defaults that are not singletons."
     },
     {
       "path": "Sources/DXClickHouse/Public/ClickHouseClient+Timeout.swift",
-      "rules": ["S011"],
+      "rules": [
+        "S011"
+      ],
       "reason": "scalarInternal, selectAllInternal, withTimeout, and injectMaxExecutionTime are all dispatch-shaped: each branch is a thin delegation or a single guard around a typed-error throw. The reported complexity comes from typed-error mapping in catch arms (catch as ClickHouseError vs. wrap into protocolError), which keeps the typed-throws SemVer contract on every call site without introducing helper indirection that would obscure the call site. Further extraction would push the bridging into deeper helpers without reducing entropy."
     },
     {
       "path": "Sources/DXClickHouse/Public/ClickHouseService.swift",
-      "rules": ["S010"],
+      "rules": [
+        "S010"
+      ],
       "reason": "swift-service-lifecycle's Service protocol mandates `func run() async throws` with untyped throws. Conforming actors must match that signature exactly. The typed-throws contract is therefore impossible on this single method; every other public throwing function on the service surface remains typed-throws."
     },
     {
       "path": "Sources/DXRedis/Public/Client/RedisClient+Service.swift",
-      "rules": ["S010"],
+      "rules": [
+        "S010"
+      ],
       "reason": "swift-service-lifecycle's Service protocol mandates `func run() async throws` with untyped throws. Conforming types must match that signature exactly. The typed-throws contract is therefore impossible on this single method; every other public throwing function on the client surface remains typed-throws."
+    },
+    {
+      "path": "Sources/DXPostgres/Internal/Types/PostgresArray.swift",
+      "rules": [
+        "S011"
+      ],
+      "reason": "scanQuoted is the byte-level state machine that reads one quoted element of a text-format array, handling backslash escapes and the closing quote. It is a small parser loop with no business logic; the branches are the literal escape grammar. The binary array readers each stay under the limit; only the text scanner needs the loop."
+    },
+    {
+      "path": "Sources/DXPostgres/Internal/Types/PostgresCopyTextEncoding.swift",
+      "rules": [
+        "S011"
+      ],
+      "reason": "appendEscapedByte dispatches on the byte value to apply the COPY text-format escapes (backslash, tab, newline, carriage return each become a two-byte escape; every other byte passes through). The exhaustive byte switch is the wire-format escape table; splitting it would scatter the one COPY-format contract."
+    },
+    {
+      "path": "Sources/DXPostgres/Internal/Connection/ResultAccumulator.swift",
+      "rules": [
+        "S011"
+      ],
+      "reason": "absorb dispatches on the backend message kind to fold one request's message stream into a result (RowDescription sets columns, DataRow appends a row, CommandComplete records the tag, ReadyForQuery ends the request, ErrorResponse is captured, the remaining acknowledgement and asynchronous messages are ignored). Each branch is a single delegating statement; the switch is the one place the request's message contract is read as a unit."
+    },
+    {
+      "path": "Sources/DXPostgres/Internal/Types/PostgresRowDecoder.swift",
+      "rules": [
+        "S007",
+        "S011"
+      ],
+      "reason": "decodeScalar performs runtime type-equality dispatch (T == UUID.self, Date.self, Decimal.self, Data.self, [UInt8].self) to route a struct field to the matching per-column decoder, falling back to JSON for any other nested Decodable. 'as! T' is the only Swift surface that converts the typed per-column result back to the generic Decodable parameter, and the exhaustive type dispatch is the standard shape of a Swift Decoder bridging a non-Codable column model into Codable. This mirrors the established DXClickHouse columnar-decoder exemption."
+    },
+    {
+      "path": "Sources/DXPostgres/Internal/Connection/PostgresRowStreamDriver.swift",
+      "rules": [
+        "S011"
+      ],
+      "reason": "step dispatches on the backend message kind while streaming one request's rows (RowDescription sets the columns, each DataRow is yielded to the async stream, ReadyForQuery ends the stream, ErrorResponse throws, the remaining acknowledgement and asynchronous messages are ignored). Each branch is a single delegating statement; the switch is the streaming counterpart of ResultAccumulator.absorb."
+    },
+    {
+      "path": "Sources/DXPostgres/Internal/Connection/PostgresConnection+Connect.swift",
+      "rules": [
+        "S011"
+      ],
+      "reason": "respondToAuthentication dispatches on the authentication-method enum the server selected (ok ends the exchange, cleartext/md5 send a password message, SASL runs the SCRAM sub-exchange, an unsupported method fails with its code). Each branch delegates to a single small helper; the switch is the one authoritative router for which credential flow the server demanded."
+    },
+    {
+      "path": "Sources/DXPostgres/Public/Client/PostgresClient+Service.swift",
+      "rules": [
+        "S010"
+      ],
+      "reason": "swift-service-lifecycle's Service protocol mandates `func run() async throws` with untyped throws. Conforming types must match that signature exactly. The typed-throws contract is therefore impossible on this single method; every other public throwing function on the client surface remains typed-throws."
+    },
+    {
+      "path": "Sources/DXPostgres/Internal/Wire/BackendMessageDecoder.swift",
+      "rules": [
+        "S011"
+      ],
+      "reason": "decodeBody dispatches on the PostgreSQL backend message type byte (the wire protocol assigns one ASCII tag per message: 'R' authentication, 'T' row description, 'D' data row, 'C' command complete, 'E' error, 'Z' ready-for-query, and so on) and authenticationVariant dispatches on the Int32 authentication subtype code (0 ok, 3 cleartext, 5 md5, 10/11/12 SASL). Both are single-purpose wire-tag routers whose every branch is a thin delegating call to a typed reader; splitting them across files would scatter the one wire-format contract that must be read as a unit."
+    },
+    {
+      "path": "Sources/DXSQLite/DXSQLite/VirtualTable/SQLiteVirtualTableRegistration.swift",
+      "rules": [
+        "S002"
+      ],
+      "reason": "The @convention(c) virtual-table module thunks SQLite invokes (xConnect, xBestIndex, xDisconnect, xOpen, xClose, xFilter, xNext, xEof, xColumn, xRowid) and their sqlite3_vtab* / sqlite3_vtab_cursor* / sqlite3_context* / sqlite3_int64* arguments are imported by Swift as Optional pointers. These Optionals are mandated by the C module contract; each is bound via guard let before use and never surfaces on the public API."
+    },
+    {
+      "path": "Sources/DXSQLite/DXSQLite/Authorizer/SQLiteAuthorizerRegistration.swift",
+      "rules": [
+        "S002",
+        "S011"
+      ],
+      "reason": "The @convention(c) authorizer thunk SQLite invokes takes void* user-data and five const char* action operands imported by Swift as Optional pointers (UnsafeMutableRawPointer?, UnsafePointer<CChar>?), each bound via guard let and never surfacing on the public API. makeAuthorizerAction dispatches on the SQLite authorizer action-code Int32 (SQLITE_CREATE_TABLE, SQLITE_READ, and so on); the exhaustive switch maps each of the ~33 stable codes to its typed SQLiteAuthorizerAction case, returning notFound for any unrecognized code so the thunk can deny it. Each branch is a single value construction; the switch is the one authoritative place the C action contract is read."
     }
   ]
 }

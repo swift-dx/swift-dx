@@ -135,6 +135,38 @@ let package = Package(
                 ),
             ]
         ),
+        .executableTarget(
+            name: "PostgresBenchmark",
+            dependencies: [
+                .product(name: "DXPostgres", package: "swift-dx"),
+            ],
+            path: "Sources/Postgres",
+            swiftSettings: [
+                .unsafeFlags(
+                    [
+                        "-enforce-exclusivity=unchecked",
+                        "-cross-module-optimization",
+                    ],
+                    .when(configuration: .release)
+                ),
+            ]
+        ),
+        .executableTarget(
+            name: "SQLiteBenchmark",
+            dependencies: [
+                .product(name: "DXSQLite", package: "swift-dx"),
+            ],
+            path: "Sources/SQLite",
+            swiftSettings: [
+                .unsafeFlags(
+                    [
+                        "-enforce-exclusivity=unchecked",
+                        "-cross-module-optimization",
+                    ],
+                    .when(configuration: .release)
+                ),
+            ]
+        ),
     ],
     swiftLanguageModes: [.v6]
 )
