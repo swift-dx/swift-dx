@@ -1,0 +1,212 @@
+//===----------------------------------------------------------------------===//
+//
+// This source file is part of the SwiftDX open source project
+//
+// Copyright (c) 2026 SwiftDX Contributors
+// Licensed under Apache License v2.0. See LICENSE for license information.
+//
+// SPDX-License-Identifier: Apache-2.0
+//
+//===----------------------------------------------------------------------===//
+
+import NIOCore
+
+// Serializers for the frontend (client-to-server) half of the PostgreSQL v3
+// wire protocol. Each function returns a ByteBuffer holding exactly one complete
+// message, ready to write to the channel. The StartupMessage and SSLRequest have
+// no type tag (they are distinguished by position in the connection); every
+// other message carries its ASCII type tag.
+enum FrontendMessage {
+
+    static let protocolVersion: Int32 = 196608
+    static let sslRequestCode: Int32 = 80877103
+
+    private static let tagPassword: UInt8 = 0x70
+    private static let tagQuery: UInt8 = 0x51
+    private static let tagParse: UInt8 = 0x50
+    private static let tagBind: UInt8 = 0x42
+    private static let tagDescribe: UInt8 = 0x44
+    private static let tagExecute: UInt8 = 0x45
+    private static let tagSync: UInt8 = 0x53
+    private static let tagTerminate: UInt8 = 0x58
+    private static let tagCopyData: UInt8 = 0x64
+    private static let tagCopyDone: UInt8 = 0x63
+    private static let tagCopyFail: UInt8 = 0x66
+    private static let describeStatementTarget: UInt8 = 0x53
+    private static let describePortalTarget: UInt8 = 0x50
+    private static let textFormatCode: Int16 = 0
+    private static let binaryFormatCode: Int16 = 1
+
+    static func startup(user: String, database: String, applicationName: String, allocator: ByteBufferAllocator) -> ByteBuffer {
+        var buffer = allocator.buffer(capacity: 96)
+        let lengthIndex = buffer.writerIndex
+        buffer.writeInteger(Int32(0))
+        buffer.writeInteger(protocolVersion)
+        writeStartupParameters(into: &buffer, user: user, database: database, applicationName: applicationName)
+        buffer.writeInteger(UInt8(0))
+        buffer.backpatchLength(at: lengthIndex)
+        return buffer
+    }
+
+    private static func writeStartupParameters(into buffer: inout ByteBuffer, user: String, database: String, applicationName: String) {
+        buffer.writeCString("user")
+        buffer.writeCString(user)
+        buffer.writeCString("database")
+        buffer.writeCString(database)
+        buffer.writeCString("application_name")
+        buffer.writeCString(applicationName)
+        buffer.writeCString("client_encoding")
+        buffer.writeCString("UTF8")
+    }
+
+    static func sslRequest(allocator: ByteBufferAllocator) -> ByteBuffer {
+        var buffer = allocator.buffer(capacity: 8)
+        buffer.writeInteger(Int32(8))
+        buffer.writeInteger(sslRequestCode)
+        return buffer
+    }
+
+    static func password(_ bytes: [UInt8], allocator: ByteBufferAllocator) -> ByteBuffer {
+        var buffer = allocator.buffer(capacity: bytes.count + 6)
+        let lengthIndex = buffer.writeMessageLengthPrefix(tag: tagPassword)
+        buffer.writeBytes(bytes)
+        buffer.writeInteger(UInt8(0))
+        buffer.backpatchLength(at: lengthIndex)
+        return buffer
+    }
+
+    static func saslInitialResponse(mechanism: String, initialResponse: [UInt8], allocator: ByteBufferAllocator) -> ByteBuffer {
+        var buffer = allocator.buffer(capacity: mechanism.utf8.count + initialResponse.count + 16)
+        let lengthIndex = buffer.writeMessageLengthPrefix(tag: tagPassword)
+        buffer.writeCString(mechanism)
+        buffer.writeInteger(Int32(initialResponse.count))
+        buffer.writeBytes(initialResponse)
+        buffer.backpatchLength(at: lengthIndex)
+        return buffer
+    }
+
+    static func saslResponse(_ bytes: [UInt8], allocator: ByteBufferAllocator) -> ByteBuffer {
+        var buffer = allocator.buffer(capacity: bytes.count + 6)
+        let lengthIndex = buffer.writeMessageLengthPrefix(tag: tagPassword)
+        buffer.writeBytes(bytes)
+        buffer.backpatchLength(at: lengthIndex)
+        return buffer
+    }
+
+    static func query(_ sql: String, allocator: ByteBufferAllocator) -> ByteBuffer {
+        var buffer = allocator.buffer(capacity: sql.utf8.count + 8)
+        let lengthIndex = buffer.writeMessageLengthPrefix(tag: tagQuery)
+        buffer.writeCString(sql)
+        buffer.backpatchLength(at: lengthIndex)
+        return buffer
+    }
+
+    static func parse(statementName: String, sql: String, allocator: ByteBufferAllocator) -> ByteBuffer {
+        var buffer = allocator.buffer(capacity: sql.utf8.count + statementName.utf8.count + 12)
+        let lengthIndex = buffer.writeMessageLengthPrefix(tag: tagParse)
+        buffer.writeCString(statementName)
+        buffer.writeCString(sql)
+        buffer.writeInteger(Int16(0))
+        buffer.backpatchLength(at: lengthIndex)
+        return buffer
+    }
+
+    // Binds parameters in text format and requests results in text format, so a
+    // Parameters are bound in text format (a single 0 format code stands for
+    // "every parameter is text") and the server coerces them to each column type.
+    // Results are requested in binary format (a single 1 code stands for "every
+    // column is binary"), which is both faster to decode and exact for floating
+    // point, timestamps, UUIDs, and bytea. The simple query protocol has no such
+    // choice and always returns text, so the row decoders handle both formats.
+    static func bind(portalName: String, statementName: String, parameters: [PostgresCell], allocator: ByteBufferAllocator) -> ByteBuffer {
+        var buffer = allocator.buffer(capacity: 64)
+        let lengthIndex = buffer.writeMessageLengthPrefix(tag: tagBind)
+        buffer.writeCString(portalName)
+        buffer.writeCString(statementName)
+        buffer.writeInteger(Int16(1))
+        buffer.writeInteger(textFormatCode)
+        writeBindParameters(into: &buffer, parameters: parameters)
+        buffer.writeInteger(Int16(1))
+        buffer.writeInteger(binaryFormatCode)
+        buffer.backpatchLength(at: lengthIndex)
+        return buffer
+    }
+
+    private static func writeBindParameters(into buffer: inout ByteBuffer, parameters: [PostgresCell]) {
+        buffer.writeInteger(Int16(parameters.count))
+        for parameter in parameters {
+            writeBindParameter(into: &buffer, parameter: parameter)
+        }
+    }
+
+    private static func writeBindParameter(into buffer: inout ByteBuffer, parameter: PostgresCell) {
+        switch parameter {
+        case .sqlNull: buffer.writeInteger(Int32(-1))
+        case .bytes(let bytes):
+            buffer.writeInteger(Int32(bytes.count))
+            buffer.writeBytes(bytes)
+        }
+    }
+
+    static func describePortal(name: String, allocator: ByteBufferAllocator) -> ByteBuffer {
+        describe(target: describePortalTarget, name: name, allocator: allocator)
+    }
+
+    static func describeStatement(name: String, allocator: ByteBufferAllocator) -> ByteBuffer {
+        describe(target: describeStatementTarget, name: name, allocator: allocator)
+    }
+
+    private static func describe(target: UInt8, name: String, allocator: ByteBufferAllocator) -> ByteBuffer {
+        var buffer = allocator.buffer(capacity: name.utf8.count + 8)
+        let lengthIndex = buffer.writeMessageLengthPrefix(tag: tagDescribe)
+        buffer.writeInteger(target)
+        buffer.writeCString(name)
+        buffer.backpatchLength(at: lengthIndex)
+        return buffer
+    }
+
+    static func execute(portalName: String, maxRows: Int32, allocator: ByteBufferAllocator) -> ByteBuffer {
+        var buffer = allocator.buffer(capacity: portalName.utf8.count + 12)
+        let lengthIndex = buffer.writeMessageLengthPrefix(tag: tagExecute)
+        buffer.writeCString(portalName)
+        buffer.writeInteger(maxRows)
+        buffer.backpatchLength(at: lengthIndex)
+        return buffer
+    }
+
+    static func sync(allocator: ByteBufferAllocator) -> ByteBuffer {
+        emptyBody(tag: tagSync, allocator: allocator)
+    }
+
+    static func terminate(allocator: ByteBufferAllocator) -> ByteBuffer {
+        emptyBody(tag: tagTerminate, allocator: allocator)
+    }
+
+    static func copyData(payload: ByteBuffer, allocator: ByteBufferAllocator) -> ByteBuffer {
+        var buffer = allocator.buffer(capacity: payload.readableBytes + 5)
+        let lengthIndex = buffer.writeMessageLengthPrefix(tag: tagCopyData)
+        var payload = payload
+        buffer.writeBuffer(&payload)
+        buffer.backpatchLength(at: lengthIndex)
+        return buffer
+    }
+
+    static func copyDone(allocator: ByteBufferAllocator) -> ByteBuffer {
+        emptyBody(tag: tagCopyDone, allocator: allocator)
+    }
+
+    static func copyFail(message: String, allocator: ByteBufferAllocator) -> ByteBuffer {
+        var buffer = allocator.buffer(capacity: message.utf8.count + 8)
+        let lengthIndex = buffer.writeMessageLengthPrefix(tag: tagCopyFail)
+        buffer.writeCString(message)
+        buffer.backpatchLength(at: lengthIndex)
+        return buffer
+    }
+
+    private static func emptyBody(tag: UInt8, allocator: ByteBufferAllocator) -> ByteBuffer {
+        var buffer = allocator.buffer(capacity: 5)
+        let lengthIndex = buffer.writeMessageLengthPrefix(tag: tag)
+        buffer.backpatchLength(at: lengthIndex)
+        return buffer
+    }
+}

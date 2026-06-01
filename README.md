@@ -22,6 +22,7 @@ All direct dependencies are sourced from `github.com/apple/*` or `github.com/swi
 | [`DXJetStream`](Sources/DXJetStream) | NATS JetStream client. |
 | [`DXClickHouse`](Sources/DXClickHouse) | ClickHouse Native protocol client. |
 | [`DXRedis`](Sources/DXRedis) | Redis client. |
+| [`DXPostgres`](Sources/DXPostgres) | PostgreSQL wire-protocol client (also YugabyteDB, CockroachDB). |
 | [`DXJSONSchema`](Sources/DXJSONSchema) | JSON Schema Draft 2020-12 validator. |
 
 ## Installation
