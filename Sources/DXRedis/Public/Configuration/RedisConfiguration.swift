@@ -91,7 +91,7 @@ public struct RedisConfiguration: Sendable {
         )
     }
 
-    var poolConfiguration: RedisConnectionPool.Configuration {
+    func poolConfiguration(observability: RedisObservability) -> RedisConnectionPool.Configuration {
         .init(
             endpoints: endpoints,
             credentials: credentials,
@@ -105,7 +105,8 @@ public struct RedisConfiguration: Sendable {
             idleTimeout: idleTimeout,
             maxLifetime: maxLifetime,
             responseDepthLimit: responseDepthLimit,
-            maxBulkBytes: maxBulkBytes
+            maxBulkBytes: maxBulkBytes,
+            observability: observability
         )
     }
 }

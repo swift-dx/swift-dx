@@ -17,6 +17,13 @@ public struct RedisCommand: Sendable, Hashable {
         self.arguments = arguments
     }
 
+    // The command verb (first argument) as raw bytes, for lazy observability
+    // labelling. Returns the verb without decoding; an empty command yields an
+    // empty array. Reading this never allocates a String on the hot path.
+    var verbBytes: [UInt8] {
+        arguments.isEmpty ? [] : arguments[0]
+    }
+
     public init(_ tokens: String...) {
         self.arguments = tokens.map { Array($0.utf8) }
     }

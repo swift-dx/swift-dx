@@ -20,6 +20,17 @@ access with a Swift 6 concurrency surface.
 - **Transparent resilience.** A per-request timeout, transient-failure retries,
   and background reconnection are built in, so callers do not handle connection
   state.
+- **Observability, hands-off.** Structured logging through the injected `swift-log`
+  `Logger`, a `swift-distributed-tracing` client span per command, and automatic
+  `swift-metrics` emission — counters `redis.commands`, `redis.command.errors`,
+  `redis.command.retries`, `redis.pool.timeouts`, `redis.connections.opened`, a
+  `redis.command.duration` timer, and `redis.pool.idle`/`redis.pool.in_use` gauges.
+  Bootstrap `MetricsSystem`/`InstrumentationSystem`/`LoggingSystem` once and it all
+  flows; with nothing bootstrapped every instrument is a no-op. Pull-based
+  `client.metrics()` (`RedisClientMetrics`) and `client.poolStats()` are also
+  available. Instrumentation lives at the command boundary, so a pipeline of N
+  commands carries the telemetry once for the whole batch — the hot path is
+  unaffected.
 
 ## Installation
 

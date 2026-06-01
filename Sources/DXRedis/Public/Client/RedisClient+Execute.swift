@@ -12,7 +12,7 @@
 extension RedisClient {
 
     func execute(_ command: RedisCommand, on database: RedisDatabaseIndex) async throws(RedisError) -> RESPValue {
-        try await withResilience {
+        try await withResilience(.verb(command.verbBytes)) {
             try await self.pool.withConnection { connection in
                 try await self.ensureDatabase(database, on: connection)
                 return try await connection.send(command)
@@ -21,7 +21,7 @@ extension RedisClient {
     }
 
     func executePipeline(_ commands: [RedisCommand], on database: RedisDatabaseIndex) async throws(RedisError) -> [RESPValue] {
-        try await withResilience {
+        try await withResilience(.fixed("PIPELINE")) {
             try await self.pool.withConnection { connection in
                 try await self.runPipeline(commands, on: connection, database: database)
             }
@@ -29,7 +29,7 @@ extension RedisClient {
     }
 
     func executePipelineExpectingSuccess(_ commands: [RedisCommand], on database: RedisDatabaseIndex) async throws(RedisError) {
-        try await withResilience {
+        try await withResilience(.fixed("PIPELINE")) {
             try await self.pool.withConnection { connection in
                 try await self.runPipelineExpectingSuccess(commands, on: connection, database: database)
             }
@@ -37,7 +37,7 @@ extension RedisClient {
     }
 
     func executeSetPipeline(_ pairs: [RedisKeyValuePair], on database: RedisDatabaseIndex) async throws(RedisError) {
-        try await withResilience {
+        try await withResilience(.fixed("MSET")) {
             try await self.pool.withConnection { connection in
                 try await self.ensureDatabase(database, on: connection)
                 try await connection.pipelineSet(pairs)
@@ -46,7 +46,7 @@ extension RedisClient {
     }
 
     func executeMultiSet(_ pairs: [RedisKeyValuePair], on database: RedisDatabaseIndex) async throws(RedisError) {
-        try await withResilience {
+        try await withResilience(.fixed("MSET")) {
             try await self.pool.withConnection { connection in
                 try await self.ensureDatabase(database, on: connection)
                 try await connection.multiSet(pairs)
@@ -55,7 +55,7 @@ extension RedisClient {
     }
 
     func executeGetPipeline(_ keys: [RedisKey], on database: RedisDatabaseIndex) async throws(RedisError) -> [RESPValue] {
-        try await withResilience {
+        try await withResilience(.fixed("MGET")) {
             try await self.pool.withConnection { connection in
                 try await self.ensureDatabase(database, on: connection)
                 return try await connection.pipelineGet(keys)
@@ -64,7 +64,7 @@ extension RedisClient {
     }
 
     func executeArray(_ command: RedisCommand, on database: RedisDatabaseIndex) async throws(RedisError) -> RedisReplyArray {
-        try await withResilience {
+        try await withResilience(.verb(command.verbBytes)) {
             try await self.pool.withConnection { connection in
                 try await self.ensureDatabase(database, on: connection)
                 return try await connection.sendArray(command)
@@ -73,7 +73,7 @@ extension RedisClient {
     }
 
     func executeArrayPipeline(_ commands: [RedisCommand], on database: RedisDatabaseIndex) async throws(RedisError) -> [RedisReplyArray] {
-        try await withResilience {
+        try await withResilience(.fixed("PIPELINE")) {
             try await self.pool.withConnection { connection in
                 try await self.ensureDatabase(database, on: connection)
                 return try await connection.sendArrayBatch(commands)

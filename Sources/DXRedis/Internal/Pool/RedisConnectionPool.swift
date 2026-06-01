@@ -36,6 +36,7 @@ actor RedisConnectionPool {
         let maxLifetime: TimeAmount
         let responseDepthLimit: Int
         let maxBulkBytes: Int
+        let observability: RedisObservability
     }
 
     private struct Entry {
@@ -60,6 +61,12 @@ actor RedisConnectionPool {
 
     func acquire() async throws -> RedisConnection {
         try ensureUsable()
+        let connection = try await grant()
+        configuration.observability.metrics.recordPoolGauges(idle: idle.count, inUse: inUseCount)
+        return connection
+    }
+
+    private func grant() async throws -> RedisConnection {
         switch takeHealthyIdle() {
         case .found(let connection): return connection
         case .notFound: return try await openOrFail()
@@ -69,6 +76,7 @@ actor RedisConnectionPool {
     func release(_ connection: RedisConnection) {
         inUseCount -= 1
         reclaim(connection)
+        configuration.observability.metrics.recordPoolGauges(idle: idle.count, inUse: inUseCount)
     }
 
     func withConnection<Value: Sendable>(_ body: @Sendable (RedisConnection) async throws -> Value) async throws -> Value {
@@ -85,6 +93,7 @@ actor RedisConnectionPool {
 
     func shutdown() async {
         isShutdown = true
+        configuration.observability.logger.emit(.poolShutdown, level: .notice)
         let connections = idle.map(\.connection)
         idle.removeAll(keepingCapacity: false)
         await closeAll(connections)
@@ -101,6 +110,8 @@ actor RedisConnectionPool {
 
     private func openOrFail() async throws -> RedisConnection {
         guard totalConnections < configuration.maxConnections else {
+            configuration.observability.metrics.recordPoolTimeout()
+            configuration.observability.logger.emitError(.poolExhausted(maxConnections: configuration.maxConnections))
             throw RedisError.poolExhausted(maxConnections: configuration.maxConnections)
         }
         return try await openAndTrack()
@@ -117,8 +128,28 @@ actor RedisConnectionPool {
     }
 
     private func openConnection() async throws -> RedisConnection {
+        let endpoint = nextEndpoint()
+        configuration.observability.logger.emit(.connecting(host: endpoint.host, port: endpoint.port))
+        let start = NIODeadline.now()
+        do {
+            let connection = try await connect(to: endpoint)
+            noteConnected(endpoint, start: start)
+            return connection
+        } catch {
+            configuration.observability.logger.emitError(.connectFailed(host: endpoint.host, port: endpoint.port, reason: "\(error)"))
+            throw error
+        }
+    }
+
+    private func noteConnected(_ endpoint: RedisEndpoint, start: NIODeadline) {
+        configuration.observability.metrics.recordConnectionOpened()
+        let elapsed = UInt64(max((NIODeadline.now() - start).nanoseconds, 0))
+        configuration.observability.logger.emit(.connected(host: endpoint.host, port: endpoint.port, durationNanos: elapsed))
+    }
+
+    private func connect(to endpoint: RedisEndpoint) async throws -> RedisConnection {
         try await RedisConnection.connect(
-            endpoint: nextEndpoint(),
+            endpoint: endpoint,
             credentials: configuration.credentials,
             database: configuration.database,
             transportSecurity: configuration.transportSecurity,

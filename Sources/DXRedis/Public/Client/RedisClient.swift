@@ -36,25 +36,30 @@ public final class RedisClient: Sendable {
     let defaultDatabase: RedisDatabaseIndex
     let maxConnections: Int
     let resilience: RedisResilience
-    let logger: Logger
+    let observability: RedisObservability
     let subscriptions = NIOLockedValueBox(SubscriptionManagerSlot.none)
 
-    init(poolConfiguration: RedisConnectionPool.Configuration, defaultDatabase: RedisDatabaseIndex, maxConnections: Int, resilience: RedisResilience, logger: Logger) {
+    var logger: Logger {
+        observability.logger.logger
+    }
+
+    init(poolConfiguration: RedisConnectionPool.Configuration, defaultDatabase: RedisDatabaseIndex, maxConnections: Int, resilience: RedisResilience, observability: RedisObservability) {
         self.pool = RedisConnectionPool(configuration: poolConfiguration)
         self.poolConfiguration = poolConfiguration
         self.defaultDatabase = defaultDatabase
         self.maxConnections = maxConnections
         self.resilience = resilience
-        self.logger = logger
+        self.observability = observability
     }
 
     public convenience init(configuration: RedisConfiguration) {
+        let observability = RedisObservability(logger: configuration.logger)
         self.init(
-            poolConfiguration: configuration.poolConfiguration,
+            poolConfiguration: configuration.poolConfiguration(observability: observability),
             defaultDatabase: configuration.database,
             maxConnections: configuration.maxConnections,
             resilience: configuration.resilience,
-            logger: configuration.logger
+            observability: observability
         )
     }
 
@@ -70,6 +75,13 @@ public final class RedisClient: Sendable {
 
     public func poolStats() async -> RedisPoolStats {
         await pool.stats()
+    }
+
+    /// A cumulative snapshot of command, error, retry, pool-timeout, and
+    /// connection-open counters since this client was created. Sample it
+    /// periodically and difference successive snapshots to derive rates.
+    public func metrics() -> RedisClientMetrics {
+        observability.metrics.snapshot()
     }
 
     public func shutdown() async {
