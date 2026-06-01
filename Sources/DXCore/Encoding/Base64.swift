@@ -16,6 +16,60 @@ package enum Base64Error: Error, Sendable, Equatable {
 
 package enum Base64 {
 
+    package static let standardAlphabet: [UInt8] = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".utf8)
+    package static let padding: UInt8 = 0x3d
+
+    package static func encode(_ bytes: [UInt8]) -> String {
+        var output: [UInt8] = []
+        output.reserveCapacity(((bytes.count + 2) / 3) * 4)
+        var index = 0
+        while index + 3 <= bytes.count {
+            appendFullTriplet(bytes: bytes, startIndex: index, output: &output)
+            index += 3
+        }
+        appendTrailingTriplet(bytes: bytes, startIndex: index, output: &output)
+        return String(decoding: output, as: UTF8.self)
+    }
+
+    @inline(__always)
+    private static func appendFullTriplet(bytes: [UInt8], startIndex: Int, output: inout [UInt8]) {
+        let combined = packTriplet(bytes: bytes, startIndex: startIndex, count: 3)
+        appendAlphabet(of: combined >> 18, into: &output)
+        appendAlphabet(of: combined >> 12, into: &output)
+        appendAlphabet(of: combined >> 6, into: &output)
+        appendAlphabet(of: combined, into: &output)
+    }
+
+    @inline(__always)
+    private static func appendTrailingTriplet(bytes: [UInt8], startIndex: Int, output: inout [UInt8]) {
+        let remaining = bytes.count - startIndex
+        guard remaining > 0 else { return }
+        let combined = packTriplet(bytes: bytes, startIndex: startIndex, count: remaining)
+        appendAlphabet(of: combined >> 18, into: &output)
+        appendAlphabet(of: combined >> 12, into: &output)
+        appendThirdEncodedByte(remaining: remaining, combined: combined, output: &output)
+        output.append(padding)
+    }
+
+    @inline(__always)
+    private static func appendThirdEncodedByte(remaining: Int, combined: UInt32, output: inout [UInt8]) {
+        guard remaining == 2 else { output.append(padding); return }
+        appendAlphabet(of: combined >> 6, into: &output)
+    }
+
+    @inline(__always)
+    private static func packTriplet(bytes: [UInt8], startIndex: Int, count: Int) -> UInt32 {
+        let b0 = UInt32(bytes[startIndex])
+        let b1 = count >= 2 ? UInt32(bytes[startIndex + 1]) : 0
+        let b2 = count >= 3 ? UInt32(bytes[startIndex + 2]) : 0
+        return (b0 << 16) | (b1 << 8) | b2
+    }
+
+    @inline(__always)
+    private static func appendAlphabet(of value: UInt32, into output: inout [UInt8]) {
+        output.append(standardAlphabet[Int(value & 0x3f)])
+    }
+
     package static func decode(_ encoded: String) throws(Base64Error) -> [UInt8] {
         let bytes = Array(encoded.utf8)
         var output: [UInt8] = []
