@@ -56,6 +56,7 @@ struct RedisResilienceTests {
         }
         let elapsed = ContinuousClock.now - start
         #expect(elapsed > .milliseconds(300), "expected the client to retry across the request timeout, took \(elapsed)")
+        #expect(client.metrics().retriesTotal > 0)
         await client.shutdown()
     }
 
@@ -67,11 +68,10 @@ struct RedisResilienceTests {
             resilience: .disabled
         )
         let client = RedisClient(configuration: configuration)
-        let start = ContinuousClock.now
         await #expect(throws: RedisError.self) {
             _ = try await client.getBytes(RedisKey("absent"))
         }
-        #expect(ContinuousClock.now - start < .milliseconds(300))
+        #expect(client.metrics().retriesTotal == 0)
         await client.shutdown()
     }
 }
