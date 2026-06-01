@@ -23,15 +23,11 @@ struct ClickHouseNullableTests {
 
     @Test("ClickHouseNullable.present and .absent are exhaustive")
     func nullableExhaustive() {
-        let present: ClickHouseNullable<Int> = .present(42)
-        let absent: ClickHouseNullable<Int> = .absent
-        switch present {
-        case .present(let value): #expect(value == 42)
-        case .absent: Issue.record("unexpected absent")
-        }
-        switch absent {
-        case .absent: break
-        case .present: Issue.record("unexpected present")
+        for nullable in [ClickHouseNullable<Int>.present(42), .absent] {
+            switch nullable {
+            case .present(let value): #expect(value == 42)
+            case .absent: #expect(nullable.isAbsent)
+            }
         }
     }
 
