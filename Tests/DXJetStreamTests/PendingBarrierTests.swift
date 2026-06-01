@@ -16,51 +16,51 @@ import Testing
 struct PendingBarrierTests {
 
     @Test
-    func barrier_waitReturnsImmediatelyWhenAlreadyDone() async throws {
+    func barrier_waitReturnsImmediatelyWhenAlreadyDone() async {
         let barrier = PendingBarrier(count: 1)
         barrier.arrive()
-        try await barrier.wait()
+        await barrier.wait()
     }
 
     @Test
-    func barrier_arrivesAfterWaitRegisters() async throws {
+    func barrier_arrivesAfterWaitRegisters() async {
         let barrier = PendingBarrier(count: 3)
         let task = Task {
-            try await barrier.wait()
+            await barrier.wait()
         }
         barrier.arrive()
         barrier.arrive()
         barrier.arrive()
-        try await task.value
+        await task.value
     }
 
     @Test
-    func barrier_handlesAllArrivalsBeforeWait() async throws {
+    func barrier_handlesAllArrivalsBeforeWait() async {
         let barrier = PendingBarrier(count: 5)
         for _ in 0..<5 {
             barrier.arrive()
         }
-        try await barrier.wait()
+        await barrier.wait()
     }
 
     @Test
-    func barrier_pipelinedRaceBetweenLastArriveAndWaitRegistration() async throws {
+    func barrier_pipelinedRaceBetweenLastArriveAndWaitRegistration() async {
         for _ in 0..<256 {
             let barrier = PendingBarrier(count: 2)
             let waitTask = Task {
-                try await barrier.wait()
+                await barrier.wait()
             }
             let arriveTask = Task {
                 barrier.arrive()
                 barrier.arrive()
             }
-            try await waitTask.value
+            await waitTask.value
             await arriveTask.value
         }
     }
 
     @Test
-    func barrier_concurrentArrivalsFromManyTasks() async throws {
+    func barrier_concurrentArrivalsFromManyTasks() async {
         let count = 1000
         let barrier = PendingBarrier(count: count)
         await withTaskGroup(of: Void.self) { group in
@@ -70,6 +70,6 @@ struct PendingBarrierTests {
                 }
             }
         }
-        try await barrier.wait()
+        await barrier.wait()
     }
 }

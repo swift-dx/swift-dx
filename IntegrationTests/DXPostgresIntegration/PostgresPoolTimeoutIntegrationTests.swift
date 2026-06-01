@@ -25,7 +25,7 @@ import Testing
         let configuration = PostgresIntegration.makeConfiguration(maxConnections: 1, requestTimeout: .milliseconds(500), resilience: .disabled)
         try await Postgres.withClient(configuration) { client in
             let held = client.queryStream("SELECT pg_sleep(5)")
-            var iterator = held.makeAsyncIterator()
+            let iterator = held.makeAsyncIterator()
             try await Task.sleep(for: .milliseconds(500))
             await #expect(throws: PostgresError.self) {
                 _ = try await client.query("SELECT 1")

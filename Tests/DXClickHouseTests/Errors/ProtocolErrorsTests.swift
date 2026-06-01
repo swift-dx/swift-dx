@@ -114,7 +114,7 @@ struct ClickHouseProtocolErrorsTests {
             }
         }
         #expect(connectResult == 0)
-        var garbage: [UInt8] = [0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA]
+        let garbage: [UInt8] = [0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA]
         let sent = garbage.withUnsafeBufferPointer { send(socketHandle, $0.baseAddress, $0.count, 0) }
         #expect(sent > 0)
     }

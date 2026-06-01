@@ -29,17 +29,9 @@ final class CapturingLogHandler: LogHandler, @unchecked Sendable {
         set { metadata[key] = newValue }
     }
 
-    func log(
-        level: Logger.Level,
-        message: Logger.Message,
-        metadata mergedMetadata: Logger.Metadata?,
-        source: String,
-        file: String,
-        function: String,
-        line: UInt
-    ) {
-        let combined: Logger.Metadata = mergedMetadata ?? [:]
-        entries.append(Entry(level: level, message: message.description, metadata: combined))
+    func log(event: LogEvent) {
+        let combined: Logger.Metadata = event.metadata ?? [:]
+        entries.append(Entry(level: event.level, message: event.message.description, metadata: combined))
     }
 
     func metadataString(at index: Int, key: String) -> String {
