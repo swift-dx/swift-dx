@@ -23,6 +23,7 @@ All direct dependencies are sourced from `github.com/apple/*` or `github.com/swi
 | [`DXClickHouse`](Sources/DXClickHouse) | ClickHouse Native protocol client. |
 | [`DXRedis`](Sources/DXRedis) | Redis client. |
 | [`DXPostgres`](Sources/DXPostgres) | PostgreSQL wire-protocol client (also YugabyteDB, CockroachDB). |
+| [`DXSQLite`](Sources/DXSQLite) | Embedded SQLite client (vendored amalgamation, WAL). |
 | [`DXJSONSchema`](Sources/DXJSONSchema) | JSON Schema Draft 2020-12 validator. |
 
 ## Installation
@@ -136,6 +137,41 @@ Authentication and TLS options, the full type and overload surface, the
 observability instruments, resilience tuning, and the ServiceLifecycle
 integration are documented in
 [Sources/DXPostgres/README.md](Sources/DXPostgres/README.md).
+
+## DXSQLite
+
+Embedded SQLite client over a vendored SQLite amalgamation — no system
+library to link and no version skew with the host. A `SQLiteDatabase`
+runs SQLite in WAL mode with one writer and many concurrent readers over
+a thread pool; reads, writes, and transactions are submitted as closures
+that run off the calling thread. Rows decode into `Codable` types or are
+read by column, large result sets stream lazily, and the database can be
+bound ambiently so deep code reaches it without being passed it. Update,
+commit, and rollback hooks, custom functions and collations, an
+authorizer, blob streaming, and session changesets are exposed; every
+public throwing function uses typed `throws(SQLiteError)`.
+
+```swift
+import DXSQLite
+
+struct Item: Codable, Sendable { let id: Int; let name: String }
+
+let database = try await SQLite.connect(SQLiteConfiguration(location: .file(path: "app.sqlite")))
+
+try await database.transaction { writer in
+    try writer.execute("CREATE TABLE IF NOT EXISTS item (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+    _ = try writer.mutate("INSERT INTO item (id, name) VALUES (?, ?)", parameters: [1, "Keyboard"])
+}
+
+let items = try await database.read { reader in
+    try reader.query("SELECT id, name FROM item ORDER BY id", as: Item.self)
+}
+await database.close()
+```
+
+A runnable tour of the reader/writer surface, streaming, ambient binding,
+hooks, custom functions, and blob and changeset APIs is in
+[Examples/Sources/SQLite/QuickStart](Examples/Sources/SQLite/QuickStart/main.swift).
 
 ## DXJSONSchema
 
