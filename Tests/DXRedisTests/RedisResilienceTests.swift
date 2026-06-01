@@ -10,11 +10,18 @@
 //===----------------------------------------------------------------------===//
 
 @testable import DXRedis
-import NIOCore
+import Synchronization
 import Testing
 
 @Suite("Redis resilience")
 struct RedisResilienceTests {
+
+    private func makeClient(_ resilience: RedisResilience) -> RedisClient {
+        RedisClient(configuration: RedisConfiguration(
+            endpoint: RedisEndpoint(host: "127.0.0.1", port: 6399),
+            resilience: resilience
+        ))
+    }
 
     @Test("the default policy retries; the disabled policy does not")
     func policyFlags() {
@@ -42,35 +49,59 @@ struct RedisResilienceTests {
         }
     }
 
-    @Test("a transient failure is retried until the request timeout elapses, then surfaced")
-    func retriesUntilTimeout() async throws {
-        let configuration = RedisConfiguration(
-            endpoint: RedisEndpoint(host: "127.0.0.1", port: 6399),
-            connectTimeout: .milliseconds(200),
-            resilience: RedisResilience(requestTimeout: .milliseconds(400), reconnectBaseDelay: .milliseconds(20), reconnectMaxDelay: .milliseconds(80))
-        )
-        let client = RedisClient(configuration: configuration)
-        let start = ContinuousClock.now
-        await #expect(throws: RedisError.self) {
-            _ = try await client.getBytes(RedisKey("absent"))
+    @Test("the default policy retries a transient failure until the operation succeeds")
+    func retriesTransientFailuresThenSucceeds() async throws {
+        let client = makeClient(RedisResilience(reconnectBaseDelay: .milliseconds(1), reconnectMaxDelay: .milliseconds(4)))
+        let attempts = Mutex(0)
+        let value = try await client.withResilience(.fixed("TEST")) { () throws -> Int in
+            let attempt = attempts.withLock { $0 += 1; return $0 }
+            guard attempt >= 3 else { throw RedisError.connectionClosed }
+            return attempt
         }
-        let elapsed = ContinuousClock.now - start
-        #expect(elapsed > .milliseconds(300), "expected the client to retry across the request timeout, took \(elapsed)")
-        #expect(client.metrics().retriesTotal > 0)
+        #expect(value == 3)
+        #expect(attempts.withLock { $0 } == 3)
+        #expect(client.metrics().retriesTotal == 2)
         await client.shutdown()
     }
 
-    @Test("the disabled policy fails on the first transient error without retrying")
-    func disabledFailsFast() async throws {
-        let configuration = RedisConfiguration(
-            endpoint: RedisEndpoint(host: "127.0.0.1", port: 6399),
-            connectTimeout: .milliseconds(200),
-            resilience: .disabled
-        )
-        let client = RedisClient(configuration: configuration)
+    @Test("a non-transient failure is surfaced on the first attempt")
+    func nonTransientFailsImmediately() async {
+        let client = makeClient(RedisResilience())
+        let attempts = Mutex(0)
         await #expect(throws: RedisError.self) {
-            _ = try await client.getBytes(RedisKey("absent"))
+            try await client.withResilience(.fixed("TEST")) { () throws -> Int in
+                attempts.withLock { $0 += 1 }
+                throw RedisError.serverError(prefix: "ERR", message: "boom")
+            }
         }
+        #expect(attempts.withLock { $0 } == 1)
+        #expect(client.metrics().retriesTotal == 0)
+        await client.shutdown()
+    }
+
+    @Test("a permanently transient failure is surfaced after retrying within the budget")
+    func permanentTransientSurfacesAfterRetrying() async {
+        let client = makeClient(RedisResilience(requestTimeout: .milliseconds(200), reconnectBaseDelay: .milliseconds(1), reconnectMaxDelay: .milliseconds(4)))
+        await #expect(throws: RedisError.self) {
+            try await client.withResilience(.fixed("TEST")) { () throws -> Int in
+                throw RedisError.connectionClosed
+            }
+        }
+        #expect(client.metrics().retriesTotal >= 1)
+        await client.shutdown()
+    }
+
+    @Test("the disabled policy makes a single attempt and does not retry")
+    func disabledMakesOneAttempt() async {
+        let client = makeClient(.disabled)
+        let attempts = Mutex(0)
+        await #expect(throws: RedisError.self) {
+            try await client.withResilience(.fixed("TEST")) { () throws -> Int in
+                attempts.withLock { $0 += 1 }
+                throw RedisError.connectionClosed
+            }
+        }
+        #expect(attempts.withLock { $0 } == 1)
         #expect(client.metrics().retriesTotal == 0)
         await client.shutdown()
     }
