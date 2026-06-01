@@ -98,6 +98,45 @@ Configuration fields, the full command surface, error cases, and the
 ServiceLifecycle integration are documented in
 [Sources/DXRedis/README.md](Sources/DXRedis/README.md).
 
+## DXPostgres
+
+Pure-Swift PostgreSQL client implementing the v3 wire protocol directly
+over SwiftNIO — no `libpq` and no system library to link. A
+`PostgresClient` owns a bounded connection pool and speaks SCRAM-SHA-256,
+MD5, and cleartext authentication with TLS. It runs simple and
+parameterized queries, streams large result sets in bounded memory, and
+supports transactions and `COPY` bulk load; a single query transparently
+retries transient failures and reconnects. Decoding covers the common
+scalar and array types plus `numeric`, JSON, money, time, interval, inet,
+the built-in geometric types, and PostGIS geometry, in both binary and
+text format. SQL NULL is a named value, never an optional, and every
+public throwing function uses typed `throws(PostgresError)`. The same
+wire protocol serves YugabyteDB and CockroachDB. Structured logging,
+`swift-distributed-tracing` spans, and `swift-metrics` instruments are
+built in and flow automatically once the application bootstraps a backend.
+
+```swift
+import DXPostgres
+
+try await Postgres.withClient(
+    PostgresConfiguration(
+        endpoint: PostgresEndpoint(host: "localhost"),
+        credentials: .password(username: "postgres", password: "secret"),
+        database: PostgresDatabaseName("appdb")
+    )
+) { postgres in
+    let result = try await postgres.query("SELECT id, name FROM accounts WHERE id = $1", binding: [42])
+    for row in result.rows {
+        print(try row.decode(Int.self, named: "id"), try row.decode(String.self, named: "name"))
+    }
+}
+```
+
+Authentication and TLS options, the full type and overload surface, the
+observability instruments, resilience tuning, and the ServiceLifecycle
+integration are documented in
+[Sources/DXPostgres/README.md](Sources/DXPostgres/README.md).
+
 ## DXJSONSchema
 
 JSON Schema Draft 2020-12 validator. Compile a schema once, then validate
