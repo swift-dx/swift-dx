@@ -28,10 +28,10 @@ import Foundation
 
 extension ClickHouseClient {
 
-    public nonisolated func execute(_ sql: String, completion: @escaping DXCallback<Void, ClickHouseError>) {
+    public nonisolated func execute(_ sql: String, settings: ClickHouseQuerySettings = .empty, completion: @escaping DXCallback<Void, ClickHouseError>) {
         Task { [self] in
             do {
-                try await self.execute(sql)
+                try await self.execute(sql, settings: settings)
                 completion(.success(()))
             } catch let error as ClickHouseError {
                 completion(.failure(error))
@@ -57,11 +57,12 @@ extension ClickHouseClient {
     public nonisolated func scalar<T: Decodable & Sendable>(
         _ sql: String,
         as type: T.Type,
+        settings: ClickHouseQuerySettings = .empty,
         completion: @escaping DXCallback<T, ClickHouseError>
     ) {
         Task { [self] in
             do {
-                let value = try await self.scalar(sql, as: type)
+                let value = try await self.scalar(sql, as: type, settings: settings)
                 completion(.success(value))
             } catch let error as ClickHouseError {
                 completion(.failure(error))
@@ -83,11 +84,12 @@ extension ClickHouseClient {
     public nonisolated func select<T: Decodable & Sendable>(
         _ sql: String,
         as type: T.Type,
+        settings: ClickHouseQuerySettings = .empty,
         completion: @escaping DXCallback<[T], ClickHouseError>
     ) {
         Task { [self] in
             do {
-                let rows = try await self.selectAll(sql, as: type)
+                let rows = try await self.selectAll(sql, as: type, settings: settings)
                 completion(.success(rows))
             } catch let error as ClickHouseError {
                 completion(.failure(error))

@@ -39,9 +39,10 @@ extension ClickHouseClient {
 
     public func execute(
         _ sql: String,
-        timeout: Duration = ClickHouseQueryDefaults.selectTimeout
+        timeout: Duration = ClickHouseQueryDefaults.selectTimeout,
+        settings: ClickHouseQuerySettings = .empty
     ) async throws(ClickHouseError) {
-        let injected = Self.injectMaxExecutionTime(into: .empty, timeout: timeout)
+        let injected = Self.injectMaxExecutionTime(into: settings, timeout: timeout)
         let captured = self
         _ = try await Self.withTimeout(self, timeout: timeout) { () -> Int in
             try await captured.executeInternal(sql: sql, settings: injected)
@@ -51,9 +52,10 @@ extension ClickHouseClient {
 
     public func execute(
         _ sqlBytes: [UInt8],
-        timeout: Duration = ClickHouseQueryDefaults.selectTimeout
+        timeout: Duration = ClickHouseQueryDefaults.selectTimeout,
+        settings: ClickHouseQuerySettings = .empty
     ) async throws(ClickHouseError) {
-        try await execute(Self.decodeSQLBytes(sqlBytes), timeout: timeout)
+        try await execute(Self.decodeSQLBytes(sqlBytes), timeout: timeout, settings: settings)
     }
 
     public func ping(
@@ -67,9 +69,10 @@ extension ClickHouseClient {
     public func scalar<T: Decodable & Sendable>(
         _ sql: String,
         as type: T.Type,
-        timeout: Duration = ClickHouseQueryDefaults.selectTimeout
+        timeout: Duration = ClickHouseQueryDefaults.selectTimeout,
+        settings: ClickHouseQuerySettings = .empty
     ) async throws(ClickHouseError) -> T {
-        let injected = Self.injectMaxExecutionTime(into: .empty, timeout: timeout)
+        let injected = Self.injectMaxExecutionTime(into: settings, timeout: timeout)
         return try await Self.withTimeout(self, timeout: timeout) {
             try await self.scalarInternal(sql: sql, type: type, settings: injected)
         }
@@ -78,9 +81,10 @@ extension ClickHouseClient {
     public func scalar<T: Decodable & Sendable>(
         _ sqlBytes: [UInt8],
         as type: T.Type,
-        timeout: Duration = ClickHouseQueryDefaults.selectTimeout
+        timeout: Duration = ClickHouseQueryDefaults.selectTimeout,
+        settings: ClickHouseQuerySettings = .empty
     ) async throws(ClickHouseError) -> T {
-        try await scalar(Self.decodeSQLBytes(sqlBytes), as: type, timeout: timeout)
+        try await scalar(Self.decodeSQLBytes(sqlBytes), as: type, timeout: timeout, settings: settings)
     }
 
     public func selectAll<T: Decodable & Sendable>(
@@ -149,13 +153,14 @@ extension ClickHouseClient {
         _ sql: String,
         as type: T.Type,
         timeout: Duration = ClickHouseQueryDefaults.streamTimeout,
+        settings: ClickHouseQuerySettings = .empty,
         handler: Handler
     ) -> Task<Void, Never> {
         let captured = self
         return Task {
             do {
                 _ = try await Self.withTimeout(captured, timeout: timeout) { () -> Int in
-                    let upstream = captured.select(sql, as: type)
+                    let upstream = captured.select(sql, as: type, settings: settings)
                     try await Self.forwardRowsToHandler(upstream: upstream, handler: handler)
                     return 0
                 }
@@ -171,9 +176,10 @@ extension ClickHouseClient {
         _ sqlBytes: [UInt8],
         as type: T.Type,
         timeout: Duration = ClickHouseQueryDefaults.streamTimeout,
+        settings: ClickHouseQuerySettings = .empty,
         handler: Handler
     ) -> Task<Void, Never> {
-        stream(Self.decodeSQLBytes(sqlBytes), as: type, timeout: timeout, handler: handler)
+        stream(Self.decodeSQLBytes(sqlBytes), as: type, timeout: timeout, settings: settings, handler: handler)
     }
 
     // Internal helpers below. These mirror the bodies of the
