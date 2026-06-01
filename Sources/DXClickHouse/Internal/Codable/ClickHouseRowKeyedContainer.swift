@@ -156,6 +156,110 @@ struct ClickHouseRowKeyedContainer<Key: CodingKey>: KeyedEncodingContainerProtoc
             try storage.appendUUID(uuid, forColumn: key.stringValue)
             return
         }
+        if let dateTime64 = value as? ClickHouseDateTime64 {
+            try storage.appendDateTime64(dateTime64.ticks, precision: dateTime64.precision, forColumn: key.stringValue)
+            return
+        }
+        if let fixedString = value as? ClickHouseFixedString {
+            try storage.appendFixedString(fixedString.bytes, length: fixedString.length, forColumn: key.stringValue)
+            return
+        }
+        if let enum8 = value as? ClickHouseEnum8 {
+            try storage.appendEnum8(enum8.value, mapping: enum8.mapping, forColumn: key.stringValue)
+            return
+        }
+        if let enum16 = value as? ClickHouseEnum16 {
+            try storage.appendEnum16(enum16.value, mapping: enum16.mapping, forColumn: key.stringValue)
+            return
+        }
+        if let lowCardinality = value as? ClickHouseLowCardinality {
+            try storage.appendLowCardinality(lowCardinality.value, inner: lowCardinality.inner, forColumn: key.stringValue)
+            return
+        }
+        if let array = value as? ClickHouseArray {
+            try storage.appendArray(array.elements, element: array.element, forColumn: key.stringValue)
+            return
+        }
+        if let tuple = value as? ClickHouseTuple {
+            try storage.appendTuple(tuple.values, elements: tuple.elements, forColumn: key.stringValue)
+            return
+        }
+        if let map = value as? ClickHouseMap {
+            try storage.appendMap(keys: map.keys, values: map.values, keyElement: map.keyElement, valueElement: map.valueElement, forColumn: key.stringValue)
+            return
+        }
+        if let arrayOfTuple = value as? ClickHouseArrayOfTuple {
+            try storage.appendArrayOfTuple(firstValues: arrayOfTuple.firstValues, secondValues: arrayOfTuple.secondValues, firstElement: arrayOfTuple.firstElement, secondElement: arrayOfTuple.secondElement, forColumn: key.stringValue)
+            return
+        }
+        if let date32 = value as? ClickHouseDate32 {
+            try storage.appendDate32(date32.days, forColumn: key.stringValue)
+            return
+        }
+        if let bfloat16 = value as? ClickHouseBFloat16 {
+            try storage.appendBFloat16(bfloat16.rawBits, forColumn: key.stringValue)
+            return
+        }
+        if let date = value as? ClickHouseDate {
+            try storage.appendDate(date.days, forColumn: key.stringValue)
+            return
+        }
+        if let time = value as? ClickHouseTime {
+            try storage.appendTime(time.seconds, forColumn: key.stringValue)
+            return
+        }
+        if let time64 = value as? ClickHouseTime64 {
+            try storage.appendTime64(time64.ticks, precision: time64.precision, forColumn: key.stringValue)
+            return
+        }
+        if let ipv4 = value as? ClickHouseIPv4 {
+            try storage.appendIPv4(ipv4.raw, forColumn: key.stringValue)
+            return
+        }
+        if let ipv6 = value as? ClickHouseIPv6 {
+            try storage.appendIPv6(ipv6.bytes, forColumn: key.stringValue)
+            return
+        }
+        if let int128 = value as? ClickHouseInt128 {
+            try storage.appendInt128(int128.value, forColumn: key.stringValue)
+            return
+        }
+        if let uint128 = value as? ClickHouseUInt128 {
+            try storage.appendUInt128(uint128.value, forColumn: key.stringValue)
+            return
+        }
+        if let int256 = value as? ClickHouseInt256 {
+            try storage.appendInt256(int256, forColumn: key.stringValue)
+            return
+        }
+        if let uint256 = value as? ClickHouseUInt256 {
+            try storage.appendUInt256(uint256, forColumn: key.stringValue)
+            return
+        }
+        if let json = value as? ClickHouseJSON {
+            try storage.appendJSON(json.bytes, forColumn: key.stringValue)
+            return
+        }
+        if let decimal = value as? ClickHouseDecimal {
+            try storage.appendDecimal(decimal, precision: decimal.precision, scale: decimal.scale, forColumn: key.stringValue)
+            return
+        }
+        if let interval = value as? ClickHouseInterval {
+            try storage.appendInterval(interval.value, kind: interval.kind, forColumn: key.stringValue)
+            return
+        }
+        if let variant = value as? ClickHouseVariant {
+            try storage.appendVariant(members: variant.members, value: variant.value, forColumn: key.stringValue)
+            return
+        }
+        if let dynamic = value as? ClickHouseDynamic {
+            try storage.appendDynamic(value: dynamic.value, forColumn: key.stringValue)
+            return
+        }
+        if let aggregateState = value as? ClickHouseAggregateState {
+            try storage.appendAggregateState(signature: aggregateState.signature, bytes: aggregateState.bytes, forColumn: key.stringValue)
+            return
+        }
         throw ClickHouseError.protocolError(
             stage: "encoder.encode",
             message: "column '\(key.stringValue)' has unsupported Swift type \(String(describing: type(of: value))). The raw Codable layer supports primitives, String, Bool, Float, Double, Date, UUID, and their Optional variants."
@@ -163,7 +267,8 @@ struct ClickHouseRowKeyedContainer<Key: CodingKey>: KeyedEncodingContainerProtoc
     }
 
     mutating func encodeIfPresent<T: Encodable>(_ value: T?, forKey key: Key) throws {
-        if try encodeIfDateOrUUIDOptional(value, forKey: key) { return }
+        if try encodeIfFoundationOptional(value, forKey: key) { return }
+        if try encodeIfWrapperOptional(value, forKey: key) { return }
         guard let value else {
             throw ClickHouseError.protocolError(
                 stage: "encoder.encodeIfPresent",
@@ -173,7 +278,7 @@ struct ClickHouseRowKeyedContainer<Key: CodingKey>: KeyedEncodingContainerProtoc
         try encode(value, forKey: key)
     }
 
-    private mutating func encodeIfDateOrUUIDOptional<T: Encodable>(_ value: T?, forKey key: Key) throws -> Bool {
+    private mutating func encodeIfFoundationOptional<T: Encodable>(_ value: T?, forKey key: Key) throws -> Bool {
         if T.self == Date.self {
             try storage.appendNullableDateTime(toNullable(value as? Date), forColumn: key.stringValue)
             return true
@@ -183,6 +288,121 @@ struct ClickHouseRowKeyedContainer<Key: CodingKey>: KeyedEncodingContainerProtoc
             return true
         }
         return false
+    }
+
+    private mutating func encodeIfWrapperOptional<T: Encodable>(_ value: T?, forKey key: Key) throws -> Bool {
+        if !isSupportedWrapperOptional(T.self) { return false }
+        guard let value else {
+            try storage.appendAbsentNullable(forColumn: key.stringValue)
+            return true
+        }
+        try encodePresentWrapper(value, forKey: key)
+        return true
+    }
+
+    private func isSupportedWrapperOptional<T>(_ type: T.Type) -> Bool {
+        if isFixedNumericWrapper(type) { return true }
+        if isFixedWidthWrapper(type) { return true }
+        if isShapedWrapper(type) { return true }
+        return false
+    }
+
+    private func isFixedNumericWrapper<T>(_ type: T.Type) -> Bool {
+        type == ClickHouseInt128.self || type == ClickHouseUInt128.self
+            || type == ClickHouseInt256.self || type == ClickHouseUInt256.self
+    }
+
+    private func isFixedWidthWrapper<T>(_ type: T.Type) -> Bool {
+        type == ClickHouseDate32.self || type == ClickHouseIPv4.self || type == ClickHouseIPv6.self
+            || type == ClickHouseDate.self || type == ClickHouseTime.self
+    }
+
+    private func isShapedWrapper<T>(_ type: T.Type) -> Bool {
+        type == ClickHouseDateTime64.self || type == ClickHouseFixedString.self
+            || type == ClickHouseEnum8.self || type == ClickHouseEnum16.self
+            || type == ClickHouseDecimal.self || type == ClickHouseTime64.self
+            || type == ClickHouseInterval.self
+    }
+
+    private mutating func encodePresentWrapper<T: Encodable>(_ value: T, forKey key: Key) throws {
+        if try encodePresentFixedNumeric(value, forKey: key) { return }
+        if try encodePresentFixedWidth(value, forKey: key) { return }
+        try encodePresentShaped(value, forKey: key)
+    }
+
+    private mutating func encodePresentFixedNumeric<T: Encodable>(_ value: T, forKey key: Key) throws -> Bool {
+        if let int128 = value as? ClickHouseInt128 {
+            try storage.appendNullableInt128(.present(int128.value), forColumn: key.stringValue)
+            return true
+        }
+        if let uint128 = value as? ClickHouseUInt128 {
+            try storage.appendNullableUInt128(.present(uint128.value), forColumn: key.stringValue)
+            return true
+        }
+        if let int256 = value as? ClickHouseInt256 {
+            try storage.appendNullableInt256(.present(int256), forColumn: key.stringValue)
+            return true
+        }
+        if let uint256 = value as? ClickHouseUInt256 {
+            try storage.appendNullableUInt256(.present(uint256), forColumn: key.stringValue)
+            return true
+        }
+        return false
+    }
+
+    private mutating func encodePresentFixedWidth<T: Encodable>(_ value: T, forKey key: Key) throws -> Bool {
+        if let date32 = value as? ClickHouseDate32 {
+            try storage.appendNullableDate32(.present(date32.days), forColumn: key.stringValue)
+            return true
+        }
+        if let ipv4 = value as? ClickHouseIPv4 {
+            try storage.appendNullableIPv4(.present(ipv4.raw), forColumn: key.stringValue)
+            return true
+        }
+        if let ipv6 = value as? ClickHouseIPv6 {
+            try storage.appendNullableIPv6(.present(ipv6.bytes), forColumn: key.stringValue)
+            return true
+        }
+        if let date = value as? ClickHouseDate {
+            try storage.appendNullableDate(.present(date.days), forColumn: key.stringValue)
+            return true
+        }
+        if let time = value as? ClickHouseTime {
+            try storage.appendNullableTime(.present(time.seconds), forColumn: key.stringValue)
+            return true
+        }
+        return false
+    }
+
+    private mutating func encodePresentShaped<T: Encodable>(_ value: T, forKey key: Key) throws {
+        if let dateTime64 = value as? ClickHouseDateTime64 {
+            try storage.appendNullableDateTime64(.present(dateTime64), precision: dateTime64.precision, forColumn: key.stringValue)
+            return
+        }
+        if let fixedString = value as? ClickHouseFixedString {
+            try storage.appendNullableFixedString(.present(fixedString.bytes), length: fixedString.length, forColumn: key.stringValue)
+            return
+        }
+        if let enum8 = value as? ClickHouseEnum8 {
+            try storage.appendNullableEnum8(.present(enum8.value), mapping: enum8.mapping, forColumn: key.stringValue)
+            return
+        }
+        if let enum16 = value as? ClickHouseEnum16 {
+            try storage.appendNullableEnum16(.present(enum16.value), mapping: enum16.mapping, forColumn: key.stringValue)
+            return
+        }
+        if let decimal = value as? ClickHouseDecimal {
+            try storage.appendNullableDecimal(.present(decimal), precision: decimal.precision, scale: decimal.scale, forColumn: key.stringValue)
+            return
+        }
+        if let time64 = value as? ClickHouseTime64 {
+            try storage.appendNullableTime64(.present(time64), precision: time64.precision, forColumn: key.stringValue)
+            return
+        }
+        if let interval = value as? ClickHouseInterval {
+            try storage.appendNullableInterval(.present(interval.value), kind: interval.kind, forColumn: key.stringValue)
+            return
+        }
     }
 
     mutating func nestedContainer<NestedKey>(keyedBy keyType: NestedKey.Type, forKey key: Key) -> KeyedEncodingContainer<NestedKey> where NestedKey: CodingKey {
@@ -206,4 +426,5 @@ struct ClickHouseRowKeyedContainer<Key: CodingKey>: KeyedEncodingContainerProtoc
         if let value { return .present(value) }
         return .absent
     }
+
 }

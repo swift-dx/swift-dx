@@ -103,9 +103,9 @@ public enum ClickHouseBlockWriter {
     private static func estimateColumnSize(column: ClickHouseTypedColumn, rowCount: Int) -> Int {
         switch column {
         case .bool, .uint8, .int8: rowCount
-        case .uint16, .int16: rowCount * 2
-        case .uint32, .int32, .float32, .dateTime: rowCount * 4
-        case .uint64, .int64, .float64: rowCount * 8
+        case .uint16, .int16, .date: rowCount * 2
+        case .uint32, .int32, .float32, .dateTime, .time: rowCount * 4
+        case .uint64, .int64, .float64, .dateTime64, .time64: rowCount * 8
         case .uuid: rowCount * 16
         case .nullableBool, .nullableUInt8, .nullableInt8: rowCount * 2
         case .nullableUInt16, .nullableInt16: rowCount * 3
@@ -114,7 +114,37 @@ public enum ClickHouseBlockWriter {
         case .nullableUUID: rowCount * 17
         case .string(let values): values.reduce(0) { $0 + 10 + $1.utf8.count }
         case .nullableString(let values): rowCount + values.reduce(0) { $0 + 10 + presentStringByteCount($1) }
+        case .fixedString(_, let length): rowCount * length
+        case .enum8: rowCount
+        case .enum16: rowCount * 2
+        case .lowCardinality(let values, _): 32 + values.count * 24
+        case .array(let values, _): rowCount * 8 + elementCount(values) * 24
+        case .date32, .ipv4: rowCount * 4
+        case .bfloat16: rowCount * 2
+        case .ipv6, .int128, .uint128: rowCount * 16
+        case .int256, .uint256: rowCount * 32
+        case .json(let values): values.reduce(0) { $0 + 10 + $1.count }
+        case .decimal(_, let precision, _): rowCount * ClickHouseDecimalWidth.bytes(forPrecision: precision)
+        case .interval: rowCount * 8
+        case .nothing: rowCount
+        case .tuple(let columns, _): columns.reduce(0) { $0 + estimateColumnSize(column: $1, rowCount: rowCount) }
+        case .map(let keys, let values, _, _):
+            rowCount * 8 + (elementCount(keys) + elementCount(values)) * 24
+        case .arrayOfTuple(let firstValues, let secondValues, _, _):
+            rowCount * 8 + (elementCount(firstValues) + elementCount(secondValues)) * 24
+        case .variant(_, _, let values):
+            8 + rowCount + values.reduce(0) { $0 + 9 + $1.count }
+        case .dynamic(let members, _, let values):
+            16 + members.reduce(0) { $0 + $1.typeName.utf8.count + 2 } + rowCount + values.reduce(0) { $0 + 9 + $1.count }
+        case .aggregateFunction(_, let states): states.reduce(0) { $0 + $1.count }
+        case .nullable(let mask, let inner): mask.count + estimateColumnSize(column: inner, rowCount: rowCount)
         }
+    }
+
+    private static func elementCount(_ rows: [[[UInt8]]]) -> Int {
+        var total = 0
+        for row in rows { total += row.count }
+        return total
     }
 
     private static func presentStringByteCount(_ nullable: ClickHouseNullable<String>) -> Int {
@@ -174,6 +204,49 @@ public enum ClickHouseBlockWriter {
                 }
                 ClickHouseWire.writeFixedInt(seconds, into: &output)
             }
+        case .dateTime64(let values, _):
+            writeFixedWidthArray(values, into: &output)
+        case .date(let values):
+            writeFixedWidthArray(values, into: &output)
+        case .time(let values):
+            writeFixedWidthArray(values, into: &output)
+        case .time64(let values, _):
+            writeFixedWidthArray(values, into: &output)
+        case .fixedString(let values, let length):
+            for value in values { writeFixedStringValue(value, length: length, into: &output) }
+        case .enum8(let values, _):
+            for value in values { output.append(UInt8(bitPattern: value)) }
+        case .enum16(let values, _):
+            writeFixedWidthArray(values, into: &output)
+        case .lowCardinality(let values, let inner):
+            writeLowCardinality(values, inner: inner, into: &output)
+        case .array(let values, let element):
+            writeArray(values, element: element, into: &output)
+        case .date32(let values):
+            writeFixedWidthArray(values, into: &output)
+        case .bfloat16(let values):
+            writeFixedWidthArray(values, into: &output)
+        case .ipv4(let values):
+            writeFixedWidthArray(values, into: &output)
+        case .ipv6(let values):
+            for value in values { writeFixedStringValue(value, length: 16, into: &output) }
+        case .int128(let values):
+            writeFixedWidthArray(values, into: &output)
+        case .uint128(let values):
+            writeFixedWidthArray(values, into: &output)
+        case .int256(let values):
+            for value in values { writeInt256Limbs(value.limb0, value.limb1, value.limb2, value.limb3, into: &output) }
+        case .uint256(let values):
+            for value in values { writeInt256Limbs(value.limb0, value.limb1, value.limb2, value.limb3, into: &output) }
+        case .json(let values):
+            for value in values { writeLengthPrefixedBytes(value, into: &output) }
+        case .decimal(let values, let precision, _):
+            let width = ClickHouseDecimalWidth.bytes(forPrecision: precision)
+            for value in values { writeDecimalLimbs(value, width: width, into: &output) }
+        case .interval(let values, _):
+            writeFixedWidthArray(values, into: &output)
+        case .nothing(let rowCount):
+            output.append(contentsOf: repeatElement(0, count: rowCount))
         case .uuid(let values):
             for uuid in values { appendUUID(uuid, into: &output) }
         case .nullableUUID(let values):
@@ -184,6 +257,22 @@ public enum ClickHouseBlockWriter {
                 case .absent: output.append(contentsOf: repeatElement(0, count: 16))
                 }
             }
+        case .tuple(let columns, _):
+            for inner in columns { writeColumnBody(column: inner, into: &output) }
+        case .map(let keys, let values, let keyElement, let valueElement):
+            writeMap(keys: keys, values: values, keyElement: keyElement, valueElement: valueElement, into: &output)
+        case .arrayOfTuple(let firstValues, let secondValues, let firstElement, let secondElement):
+            writeMap(keys: firstValues, values: secondValues, keyElement: firstElement, valueElement: secondElement, into: &output)
+        case .variant(let members, let discriminators, let values):
+            writeVariant(members: members, discriminators: discriminators, values: values, into: &output)
+        case .dynamic(let members, let discriminators, let values):
+            ClickHouseDynamicPrefix.write(members: members, into: &output)
+            writeDynamicVariantBody(members: members, discriminators: discriminators, values: values, into: &output)
+        case .aggregateFunction(_, let states):
+            for state in states { output.append(contentsOf: state) }
+        case .nullable(let mask, let inner):
+            for isNull in mask { output.append(isNull ? 1 : 0) }
+            writeColumnBody(column: inner, into: &output)
         }
     }
 
@@ -205,7 +294,11 @@ public enum ClickHouseBlockWriter {
 
     @inline(__always)
     private static func writeFixedWidthArray<T: FixedWidthInteger>(_ values: [T], into output: inout [UInt8]) {
+        #if _endian(little)
+        values.withUnsafeBytes { output.append(contentsOf: $0) }
+        #else
         for value in values { ClickHouseWire.writeFixedInt(value, into: &output) }
+        #endif
     }
 
     @inline(__always)
@@ -223,12 +316,20 @@ public enum ClickHouseBlockWriter {
 
     @inline(__always)
     private static func writeFloat32Array(_ values: [Float], into output: inout [UInt8]) {
+        #if _endian(little)
+        values.withUnsafeBytes { output.append(contentsOf: $0) }
+        #else
         for value in values { ClickHouseWire.writeFixedInt(value.bitPattern, into: &output) }
+        #endif
     }
 
     @inline(__always)
     private static func writeFloat64Array(_ values: [Double], into output: inout [UInt8]) {
+        #if _endian(little)
+        values.withUnsafeBytes { output.append(contentsOf: $0) }
+        #else
         for value in values { ClickHouseWire.writeFixedInt(value.bitPattern, into: &output) }
+        #endif
     }
 
     @inline(__always)
@@ -254,6 +355,196 @@ public enum ClickHouseBlockWriter {
             case .absent: bits = 0
             }
             ClickHouseWire.writeFixedInt(bits, into: &output)
+        }
+    }
+
+    // ClickHouse LowCardinality serialization flag: bit 9 (HasAdditionalKeys)
+    // marks the dictionary as carried inline in this block rather than
+    // referenced from a shared global dictionary (bit 8). Native-format
+    // inserts must set HasAdditionalKeys and must NOT set the global-
+    // dictionary bit. The index width occupies the low byte.
+    private static let lowCardinalityHasAdditionalKeysBit: UInt64 = 0x0200
+
+    private static func writeLowCardinality(_ values: [[UInt8]], inner: ClickHouseLowCardinalityInner, into output: inout [UInt8]) {
+        if values.isEmpty { return }
+        var dictionary: [[UInt8]] = []
+        var lookup: [[UInt8]: Int] = [:]
+        lookup.reserveCapacity(values.count)
+        var indices: [Int] = []
+        indices.reserveCapacity(values.count)
+        for value in values {
+            if let existing = lookup[value] {
+                indices.append(existing)
+            } else {
+                let assigned = dictionary.count
+                dictionary.append(value)
+                lookup[value] = assigned
+                indices.append(assigned)
+            }
+        }
+        let widthCode = lowCardinalityWidthCode(dictionarySize: dictionary.count)
+        ClickHouseWire.writeFixedInt(UInt64(1), into: &output)
+        ClickHouseWire.writeFixedInt(lowCardinalityHasAdditionalKeysBit | widthCode.code, into: &output)
+        ClickHouseWire.writeFixedInt(UInt64(dictionary.count), into: &output)
+        writeLowCardinalityDictionary(dictionary, inner: inner, into: &output)
+        ClickHouseWire.writeFixedInt(UInt64(values.count), into: &output)
+        for index in indices {
+            writeLowCardinalityIndex(index, width: widthCode.width, into: &output)
+        }
+    }
+
+    private static func lowCardinalityWidthCode(dictionarySize: Int) -> (code: UInt64, width: Int) {
+        let maxIndex = dictionarySize - 1
+        if maxIndex <= Int(UInt8.max) { return (0, 1) }
+        if maxIndex <= Int(UInt16.max) { return (1, 2) }
+        if maxIndex <= Int(UInt32.max) { return (2, 4) }
+        return (3, 8)
+    }
+
+    private static func writeLowCardinalityDictionary(_ dictionary: [[UInt8]], inner: ClickHouseLowCardinalityInner, into output: inout [UInt8]) {
+        switch inner {
+        case .string:
+            for value in dictionary { writeLengthPrefixedBytes(value, into: &output) }
+        case .fixedString(let length):
+            for value in dictionary { writeFixedStringValue(value, length: length, into: &output) }
+        }
+    }
+
+    private static func writeLengthPrefixedBytes(_ bytes: [UInt8], into output: inout [UInt8]) {
+        ClickHouseWire.writeUVarInt(UInt64(bytes.count), into: &output)
+        output.append(contentsOf: bytes)
+    }
+
+    private static func writeLowCardinalityIndex(_ index: Int, width: Int, into output: inout [UInt8]) {
+        switch width {
+        case 1: output.append(UInt8(truncatingIfNeeded: index))
+        case 2: ClickHouseWire.writeFixedInt(UInt16(truncatingIfNeeded: index), into: &output)
+        case 4: ClickHouseWire.writeFixedInt(UInt32(truncatingIfNeeded: index), into: &output)
+        default: ClickHouseWire.writeFixedInt(UInt64(truncatingIfNeeded: index), into: &output)
+        }
+    }
+
+    @inline(__always)
+    private static func writeInt256Limbs(_ limb0: UInt64, _ limb1: UInt64, _ limb2: UInt64, _ limb3: UInt64, into output: inout [UInt8]) {
+        ClickHouseWire.writeFixedInt(limb0, into: &output)
+        ClickHouseWire.writeFixedInt(limb1, into: &output)
+        ClickHouseWire.writeFixedInt(limb2, into: &output)
+        ClickHouseWire.writeFixedInt(limb3, into: &output)
+    }
+
+    @inline(__always)
+    private static func writeDecimalLimbs(_ value: ClickHouseDecimal, width: Int, into output: inout [UInt8]) {
+        switch width {
+        case 4: ClickHouseWire.writeFixedInt(UInt32(truncatingIfNeeded: value.limb0), into: &output)
+        case 8: ClickHouseWire.writeFixedInt(value.limb0, into: &output)
+        case 16:
+            ClickHouseWire.writeFixedInt(value.limb0, into: &output)
+            ClickHouseWire.writeFixedInt(value.limb1, into: &output)
+        default:
+            writeInt256Limbs(value.limb0, value.limb1, value.limb2, value.limb3, into: &output)
+        }
+    }
+
+    private static func writeArray(_ values: [[[UInt8]]], element: ClickHouseArrayElementType, into output: inout [UInt8]) {
+        var cumulative: UInt64 = 0
+        for row in values {
+            cumulative += UInt64(row.count)
+            ClickHouseWire.writeFixedInt(cumulative, into: &output)
+        }
+        for row in values {
+            writeArrayElements(row, element: element, into: &output)
+        }
+    }
+
+    private static func writeMap(
+        keys: [[[UInt8]]],
+        values: [[[UInt8]]],
+        keyElement: ClickHouseArrayElementType,
+        valueElement: ClickHouseArrayElementType,
+        into output: inout [UInt8]
+    ) {
+        var cumulative: UInt64 = 0
+        for row in keys {
+            cumulative += UInt64(row.count)
+            ClickHouseWire.writeFixedInt(cumulative, into: &output)
+        }
+        for row in keys {
+            writeArrayElements(row, element: keyElement, into: &output)
+        }
+        for row in values {
+            writeArrayElements(row, element: valueElement, into: &output)
+        }
+    }
+
+    // Variant body: 8-byte basic-discriminators mode prefix (0), then one
+    // discriminator byte per row (alphabetical member index, 255 = NULL),
+    // then each member's sub-column in member-index order carrying only the
+    // present rows' raw values in row order. The sub-column body is the
+    // normal Native body for that member element type.
+    private static func writeVariant(
+        members: [ClickHouseArrayElementType],
+        discriminators: [UInt8],
+        values: [[UInt8]],
+        into output: inout [UInt8]
+    ) {
+        ClickHouseWire.writeFixedInt(UInt64(0), into: &output)
+        output.append(contentsOf: discriminators)
+        for memberIndex in members.indices {
+            let present = presentValues(forMember: UInt8(memberIndex), discriminators: discriminators, values: values)
+            writeArrayElements(present, element: members[memberIndex], into: &output)
+        }
+    }
+
+    // Dynamic embedded-Variant body: the 8-byte basic-discriminators mode
+    // prefix (0), one global discriminator byte per row (255 = NULL), then
+    // each member's sub-column in member-name-list order carrying only that
+    // member's present rows. The discriminators are global (they account
+    // for the hidden SharedVariant member), so each member's present rows
+    // are selected by matching its global discriminator rather than its
+    // member-list index.
+    private static func writeDynamicVariantBody(
+        members: [ClickHouseArrayElementType],
+        discriminators: [UInt8],
+        values: [[UInt8]],
+        into output: inout [UInt8]
+    ) {
+        ClickHouseWire.writeFixedInt(UInt64(0), into: &output)
+        output.append(contentsOf: discriminators)
+        let globalDiscriminators = ClickHouseDynamicColumnBuilder.globalDiscriminators(of: members)
+        for memberIndex in members.indices {
+            let present = presentValues(forMember: globalDiscriminators[memberIndex], discriminators: discriminators, values: values)
+            writeArrayElements(present, element: members[memberIndex], into: &output)
+        }
+    }
+
+    private static func presentValues(forMember member: UInt8, discriminators: [UInt8], values: [[UInt8]]) -> [[UInt8]] {
+        var present: [[UInt8]] = []
+        for row in discriminators.indices where discriminators[row] == member {
+            present.append(values[row])
+        }
+        return present
+    }
+
+    private static func writeArrayElements(_ elements: [[UInt8]], element: ClickHouseArrayElementType, into output: inout [UInt8]) {
+        let width = element.fixedWidth
+        if width < 0 {
+            for value in elements { writeLengthPrefixedBytes(value, into: &output) }
+        } else {
+            for value in elements { writeFixedStringValue(value, length: width, into: &output) }
+        }
+    }
+
+    @inline(__always)
+    private static func writeFixedStringValue(_ value: [UInt8], length: Int, into output: inout [UInt8]) {
+        if value.count == length {
+            output.append(contentsOf: value)
+            return
+        }
+        if value.count >= length {
+            output.append(contentsOf: value[value.startIndex..<value.startIndex + length])
+        } else {
+            output.append(contentsOf: value)
+            output.append(contentsOf: repeatElement(0, count: length - value.count))
         }
     }
 

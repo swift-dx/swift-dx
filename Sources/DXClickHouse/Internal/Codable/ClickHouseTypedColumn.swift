@@ -64,6 +64,42 @@ public enum ClickHouseTypedColumn: Sendable {
     case uuid([UUID])
     case nullableUUID([ClickHouseNullable<UUID>])
 
+    case dateTime64([Int64], precision: UInt8)
+    case date([UInt16])
+    case time([Int32])
+    case time64([Int64], precision: UInt8)
+    case fixedString([[UInt8]], length: Int)
+    case enum8([Int8], mapping: [ClickHouseEnumPair])
+    case enum16([Int16], mapping: [ClickHouseEnumPair])
+    case lowCardinality([[UInt8]], inner: ClickHouseLowCardinalityInner)
+    case array([[[UInt8]]], element: ClickHouseArrayElementType)
+    case date32([Int32])
+    case bfloat16([UInt16])
+    case ipv4([UInt32])
+    case ipv6([[UInt8]])
+    case int128([Int128])
+    case uint128([UInt128])
+    case int256([ClickHouseInt256])
+    case uint256([ClickHouseUInt256])
+    case json([[UInt8]])
+    case decimal([ClickHouseDecimal], precision: UInt8, scale: UInt8)
+    case interval([Int64], kind: ClickHouseIntervalKind)
+    case nothing(rowCount: Int)
+
+    indirect case tuple([ClickHouseTypedColumn], names: [String])
+
+    case map(keys: [[[UInt8]]], values: [[[UInt8]]], keyElement: ClickHouseArrayElementType, valueElement: ClickHouseArrayElementType)
+
+    case arrayOfTuple(firstValues: [[[UInt8]]], secondValues: [[[UInt8]]], firstElement: ClickHouseArrayElementType, secondElement: ClickHouseArrayElementType)
+
+    case variant(members: [ClickHouseArrayElementType], discriminators: [UInt8], values: [[UInt8]])
+
+    case dynamic(members: [ClickHouseArrayElementType], discriminators: [UInt8], values: [[UInt8]])
+
+    case aggregateFunction(signature: String, states: [[UInt8]])
+
+    indirect case nullable(mask: [Bool], inner: ClickHouseTypedColumn)
+
     public var rowCount: Int {
         switch self {
         case .string(let values): values.count
@@ -94,7 +130,40 @@ public enum ClickHouseTypedColumn: Sendable {
         case .nullableDateTime(let values): values.count
         case .uuid(let values): values.count
         case .nullableUUID(let values): values.count
+        case .dateTime64(let values, _): values.count
+        case .date(let values): values.count
+        case .time(let values): values.count
+        case .time64(let values, _): values.count
+        case .fixedString(let values, _): values.count
+        case .enum8(let values, _): values.count
+        case .enum16(let values, _): values.count
+        case .lowCardinality(let values, _): values.count
+        case .array(let values, _): values.count
+        case .date32(let values): values.count
+        case .bfloat16(let values): values.count
+        case .ipv4(let values): values.count
+        case .ipv6(let values): values.count
+        case .int128(let values): values.count
+        case .uint128(let values): values.count
+        case .int256(let values): values.count
+        case .uint256(let values): values.count
+        case .json(let values): values.count
+        case .decimal(let values, _, _): values.count
+        case .interval(let values, _): values.count
+        case .nothing(let rowCount): rowCount
+        case .tuple(let columns, _): Self.tupleRowCount(columns)
+        case .map(let keys, _, _, _): keys.count
+        case .arrayOfTuple(let firstValues, _, _, _): firstValues.count
+        case .variant(_, let discriminators, _): discriminators.count
+        case .dynamic(_, let discriminators, _): discriminators.count
+        case .aggregateFunction(_, let states): states.count
+        case .nullable(let mask, _): mask.count
         }
+    }
+
+    private static func tupleRowCount(_ columns: [ClickHouseTypedColumn]) -> Int {
+        guard let first = columns.first else { return 0 }
+        return first.rowCount
     }
 
     public var typeName: String {
@@ -127,6 +196,34 @@ public enum ClickHouseTypedColumn: Sendable {
         case .nullableDateTime: "Nullable(DateTime)"
         case .uuid: "UUID"
         case .nullableUUID: "Nullable(UUID)"
+        case .dateTime64(_, let precision): "DateTime64(\(precision))"
+        case .date: "Date"
+        case .time: "Time"
+        case .time64(_, let precision): "Time64(\(precision))"
+        case .fixedString(_, let length): "FixedString(\(length))"
+        case .enum8(_, let mapping): "Enum8(\(ClickHouseEnumMapping.render(mapping)))"
+        case .enum16(_, let mapping): "Enum16(\(ClickHouseEnumMapping.render(mapping)))"
+        case .lowCardinality(_, let inner): "LowCardinality(\(inner.typeName))"
+        case .array(_, let element): "Array(\(element.typeName))"
+        case .date32: "Date32"
+        case .bfloat16: "BFloat16"
+        case .ipv4: "IPv4"
+        case .ipv6: "IPv6"
+        case .int128: "Int128"
+        case .uint128: "UInt128"
+        case .int256: "Int256"
+        case .uint256: "UInt256"
+        case .json: "String"
+        case .decimal(_, let precision, let scale): "Decimal(\(precision), \(scale))"
+        case .interval(_, let kind): kind.typeName
+        case .nothing: "Nothing"
+        case .tuple(let columns, let names): "Tuple(\(ClickHouseTupleTypeName.render(columns: columns, names: names)))"
+        case .map(_, _, let keyElement, let valueElement): "Map(\(keyElement.typeName), \(valueElement.typeName))"
+        case .arrayOfTuple(_, _, let firstElement, let secondElement): "Array(Tuple(\(firstElement.typeName), \(secondElement.typeName)))"
+        case .variant(let members, _, _): "Variant(\(ClickHouseVariantTypeName.render(members)))"
+        case .dynamic: "Dynamic"
+        case .aggregateFunction(let signature, _): "AggregateFunction(\(signature))"
+        case .nullable(_, let inner): "Nullable(\(inner.typeName))"
         }
     }
 }

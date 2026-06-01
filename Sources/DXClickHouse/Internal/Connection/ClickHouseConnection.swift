@@ -458,8 +458,9 @@ public final class ClickHouseConnection {
         schema.reserveCapacity(prologue.columnCount)
         for _ in 0..<prologue.columnCount {
             let header = try parseColumnHeader(revision: negotiatedRevision)
-            try skipColumnBody(typeName: header.type, rows: prologue.rowCount)
-            schema.append(.init(name: header.name, typeName: header.type))
+            let expandedType = ClickHouseGeoTypeName.expand(header.type)
+            try skipColumnBody(typeName: expandedType, rows: prologue.rowCount)
+            schema.append(.init(name: header.name, typeName: expandedType))
         }
         arena.compact()
         return schema
@@ -689,6 +690,13 @@ public final class ClickHouseConnection {
             try skipColumnPrefix(typeName: valueType, rows: rows)
             return
         }
+        if typeName.hasPrefix("Tuple(") {
+            let elements = try ClickHouseTupleTypeSplitter.split(typeName: typeName)
+            for element in elements {
+                try skipColumnPrefix(typeName: element.type, rows: rows)
+            }
+            return
+        }
         if typeName.hasPrefix("Nullable(") {
             let inner = innerType(typeName: typeName, prefix: "Nullable(")
             try skipColumnPrefix(typeName: inner, rows: rows)
@@ -718,8 +726,27 @@ public final class ClickHouseConnection {
             try skipMapBody(typeName: typeName, rows: rows)
             return
         }
+        if typeName.hasPrefix("Tuple(") {
+            let elements = try ClickHouseTupleTypeSplitter.split(typeName: typeName)
+            for element in elements {
+                try skipColumnBodyAfterPrefix(typeName: element.type, rows: rows)
+            }
+            return
+        }
+        if typeName.hasPrefix("Variant(") {
+            try skipVariantBody(typeName: typeName, rows: rows)
+            return
+        }
+        if typeName == "Dynamic" || typeName.hasPrefix("Dynamic(") {
+            try skipDynamicBody(rows: rows)
+            return
+        }
         if typeName == "JSON" || typeName.hasPrefix("JSON(") || typeName.hasPrefix("Object(") {
             try skipJSONBody(rows: rows)
+            return
+        }
+        if typeName.hasPrefix("AggregateFunction(") {
+            try skipAggregateFunctionBody(typeName: typeName, rows: rows)
             return
         }
         let byteCount = try columnByteWidth(typeName: typeName, rows: rows)
@@ -856,6 +883,60 @@ public final class ClickHouseConnection {
         try skipColumnBodyAfterPrefix(typeName: valueType, rows: Int(totalElements))
     }
 
+    // Variant(T0, T1, ...) body layout:
+    //   UInt64 basic-discriminators mode prefix (0)
+    //   UInt8[rows] discriminators (member index, 255 = NULL)
+    //   each member's sub-column with its present-row count
+    private func skipVariantBody(typeName: String, rows: Int) throws(ClickHouseError) {
+        if rows == 0 { return }
+        let members = try ClickHouseTupleTypeSplitter.split(typeName: variantAsTuple(typeName))
+        _ = try readFixedInt(UInt64.self)
+        try ensureBytes(rows)
+        var counts = [Int](repeating: 0, count: members.count)
+        arena.withReadPointer { base, _ in
+            let discriminators = UnsafeBufferPointer(start: base, count: rows)
+            for index in 0..<rows {
+                let discriminator = discriminators[index]
+                if discriminator != 255 { counts[Int(discriminator)] += 1 }
+            }
+        }
+        arena.advanceHead(by: rows)
+        for index in members.indices {
+            try skipColumnBodyAfterPrefix(typeName: members[index].type, rows: counts[index])
+        }
+    }
+
+    // Dynamic body: structure-version prefix, uvarint max-types, uvarint
+    // member count, member type-name strings, then an embedded Variant
+    // body. Reads the structure prefix to learn the sub-column types, then
+    // skips the embedded Variant. Per-member counts align ascending
+    // distinct present discriminators to member positions.
+    private func skipDynamicBody(rows: Int) throws(ClickHouseError) {
+        if rows == 0 { return }
+        let structureVersion = try readFixedInt(UInt64.self)
+        if structureVersion == 1 {
+            _ = try readUVarInt()
+        }
+        let memberCount = try readUVarInt()
+        var memberTypes: [String] = []
+        memberTypes.reserveCapacity(Int(memberCount))
+        for _ in 0..<Int(memberCount) {
+            memberTypes.append(try readString())
+        }
+        _ = try readFixedInt(UInt64.self)
+        try ensureBytes(rows)
+        var rawDiscriminators = [UInt8](repeating: 0, count: rows)
+        arena.withReadPointer { base, _ in
+            let discriminators = UnsafeBufferPointer(start: base, count: rows)
+            for index in 0..<rows { rawDiscriminators[index] = discriminators[index] }
+        }
+        arena.advanceHead(by: rows)
+        let counts = memberPresentCounts(rawDiscriminators, memberCount: Int(memberCount))
+        for index in memberTypes.indices {
+            try skipColumnBodyAfterPrefix(typeName: memberTypes[index], rows: counts[index])
+        }
+    }
+
     // JSON body (CH >= 24.10 dynamic JSON): a length-prefixed binary
     // payload per row. Each row begins with a UVarInt giving total
     // payload byte length, followed by that many bytes. This is the
@@ -909,9 +990,10 @@ public final class ClickHouseConnection {
         types.reserveCapacity(prologue.columnCount)
         for _ in 0..<prologue.columnCount {
             let header = try parseColumnHeader(revision: revision)
+            let expandedType = ClickHouseGeoTypeName.expand(header.type)
             names.append(header.name)
-            types.append(header.type)
-            try skipColumnBody(typeName: header.type, rows: prologue.rowCount)
+            types.append(expandedType)
+            try skipColumnBody(typeName: expandedType, rows: prologue.rowCount)
         }
         if prologue.rowCount > 0 {
             do {
@@ -937,16 +1019,17 @@ public final class ClickHouseConnection {
         bodies.reserveCapacity(prologue.columnCount)
         for _ in 0..<prologue.columnCount {
             let header = try parseColumnHeader(revision: revision)
+            let expandedType = ClickHouseGeoTypeName.expand(header.type)
             names.append(header.name)
-            types.append(header.type)
+            types.append(expandedType)
             var body: [UInt8] = []
-            if header.type == "String" {
+            if expandedType == "String" {
                 try copyStringColumnBody(rows: prologue.rowCount, into: &body)
-            } else if header.type.hasPrefix("FixedString(") {
-                let width = fixedStringWidth(header.type)
+            } else if expandedType.hasPrefix("FixedString(") {
+                let width = fixedStringWidth(expandedType)
                 try copyFixedBytes(byteCount: width * prologue.rowCount, into: &body)
             } else {
-                try skipColumnBody(typeName: header.type, rows: prologue.rowCount)
+                try skipColumnBody(typeName: expandedType, rows: prologue.rowCount)
             }
             bodies.append(body)
         }
@@ -1015,10 +1098,11 @@ public final class ClickHouseConnection {
         combinedRanges.reserveCapacity(prologue.columnCount)
         for _ in 0..<prologue.columnCount {
             let header = try parseColumnHeader(revision: revision)
+            let expandedType = ClickHouseGeoTypeName.expand(header.type)
             names.append(header.name)
-            types.append(header.type)
+            types.append(expandedType)
             let start = combined.count
-            try copyColumnBody(typeName: header.type, rows: prologue.rowCount, into: &combined)
+            try copyColumnBody(typeName: expandedType, rows: prologue.rowCount, into: &combined)
             combinedRanges.append(start..<combined.count)
         }
         let block = ClickHouseBlock(
@@ -1060,6 +1144,34 @@ public final class ClickHouseConnection {
             try copyColumnBody(typeName: inner, rows: rows, into: &output)
             return
         }
+        if typeName.hasPrefix("Array(") {
+            try copyArrayColumnBody(typeName: typeName, rows: rows, into: &output)
+            return
+        }
+        if typeName.hasPrefix("LowCardinality(") {
+            try copyLowCardinalityColumnBody(typeName: typeName, rows: rows, into: &output)
+            return
+        }
+        if typeName.hasPrefix("Tuple(") {
+            try copyTupleColumnBody(typeName: typeName, rows: rows, into: &output)
+            return
+        }
+        if typeName.hasPrefix("Map(") {
+            try copyMapColumnBody(typeName: typeName, rows: rows, into: &output)
+            return
+        }
+        if typeName.hasPrefix("Variant(") {
+            try copyVariantColumnBody(typeName: typeName, rows: rows, into: &output)
+            return
+        }
+        if typeName == "Dynamic" || typeName.hasPrefix("Dynamic(") {
+            try copyDynamicColumnBody(rows: rows, into: &output)
+            return
+        }
+        if typeName.hasPrefix("AggregateFunction(") {
+            try copyAggregateFunctionColumnBody(typeName: typeName, rows: rows, into: &output)
+            return
+        }
         let byteCount = try columnByteWidth(typeName: typeName, rows: rows)
         if byteCount >= 0 {
             try ensureBytes(byteCount)
@@ -1084,28 +1196,241 @@ public final class ClickHouseConnection {
         }
     }
 
+    // Array(T) body: rowCount cumulative UInt64 offsets, then the inner
+    // column with totalElements (= last offset) rows. We copy the offsets
+    // verbatim and recurse for the flattened inner body so the typed
+    // Codable decoder can lift offsets + inner directly.
+    private func copyArrayColumnBody(typeName: String, rows: Int, into output: inout [UInt8]) throws(ClickHouseError) {
+        let inner = innerType(typeName: typeName, prefix: "Array(")
+        var totalElements = 0
+        for index in 0..<rows {
+            let value = try readFixedInt(UInt64.self)
+            ClickHouseWire.writeFixedInt(value, into: &output)
+            if index == rows - 1 { totalElements = Int(value) }
+        }
+        try copyColumnBody(typeName: inner, rows: totalElements, into: &output)
+    }
+
+    // LowCardinality(T) body: KeysSerializationVersion, serialization type
+    // (key width in the low byte), dictionary size, the dictionary values
+    // in the inner type's body format, the index count, then index count
+    // indices at the chosen width. All copied verbatim for the decoder.
+    private func copyLowCardinalityColumnBody(typeName: String, rows: Int, into output: inout [UInt8]) throws(ClickHouseError) {
+        if rows == 0 { return }
+        let inner = innerType(typeName: typeName, prefix: "LowCardinality(")
+        let version = try readFixedInt(UInt64.self)
+        ClickHouseWire.writeFixedInt(version, into: &output)
+        let serializationType = try readFixedInt(UInt64.self)
+        ClickHouseWire.writeFixedInt(serializationType, into: &output)
+        let keyWidth = lowCardinalityKeyWidth(serializationType: serializationType)
+        let dictionarySize = try readFixedInt(UInt64.self)
+        ClickHouseWire.writeFixedInt(dictionarySize, into: &output)
+        try copyColumnBody(typeName: inner, rows: Int(dictionarySize), into: &output)
+        let indicesCount = try readFixedInt(UInt64.self)
+        ClickHouseWire.writeFixedInt(indicesCount, into: &output)
+        let indexBytes = Int(indicesCount) * keyWidth
+        try ensureBytes(indexBytes)
+        arena.withReadPointer { base, _ in
+            output.append(contentsOf: UnsafeBufferPointer(start: base, count: indexBytes))
+        }
+        arena.advanceHead(by: indexBytes)
+    }
+
+    // Tuple(T1, T2, ...) body: each element column serialized in full
+    // sequentially, every element carrying `rows` rows, with no offsets
+    // or delimiters between elements. We recurse copyColumnBody for each
+    // element type so the typed Codable decoder can re-split and lift the
+    // inner columns directly. Element names in the type string (named
+    // tuples) are metadata only and do not affect the byte layout.
+    private func copyTupleColumnBody(typeName: String, rows: Int, into output: inout [UInt8]) throws(ClickHouseError) {
+        let elements = try ClickHouseTupleTypeSplitter.split(typeName: typeName)
+        for element in elements {
+            try copyColumnBody(typeName: element.type, rows: rows, into: &output)
+        }
+    }
+
+    // Map(K, V) body: same layout as Array(Tuple(K, V)). rowCount
+    // cumulative UInt64 entry-count offsets, then the K column with
+    // totalElements (= last offset) rows, then the V column with the
+    // same totalElements rows. We copy the offsets verbatim and recurse
+    // for the flattened key and value bodies so the typed Codable decoder
+    // can lift offsets + K + V directly.
+    private func copyMapColumnBody(typeName: String, rows: Int, into output: inout [UInt8]) throws(ClickHouseError) {
+        let inner = innerType(typeName: typeName, prefix: "Map(")
+        let (keyType, valueType) = splitMapInner(inner)
+        var totalElements = 0
+        for index in 0..<rows {
+            let value = try readFixedInt(UInt64.self)
+            ClickHouseWire.writeFixedInt(value, into: &output)
+            if index == rows - 1 { totalElements = Int(value) }
+        }
+        try copyColumnBody(typeName: keyType, rows: totalElements, into: &output)
+        try copyColumnBody(typeName: valueType, rows: totalElements, into: &output)
+    }
+
+    // Variant(T0, T1, ...) body: an 8-byte basic-discriminators mode
+    // prefix (always 0), then one discriminator byte per row (the member's
+    // alphabetical index, 255 = NULL), then each member's sub-column in
+    // member-index order carrying only the present rows' values. We copy
+    // the mode prefix and discriminator array verbatim, count how many rows
+    // select each member, and recurse copyColumnBody for each member with
+    // that present count so the typed Codable decoder can scatter the
+    // sub-columns back per row.
+    private func copyVariantColumnBody(typeName: String, rows: Int, into output: inout [UInt8]) throws(ClickHouseError) {
+        if rows == 0 { return }
+        let members = try ClickHouseTupleTypeSplitter.split(typeName: variantAsTuple(typeName))
+        let modePrefix = try readFixedInt(UInt64.self)
+        ClickHouseWire.writeFixedInt(modePrefix, into: &output)
+        try ensureBytes(rows)
+        var counts = [Int](repeating: 0, count: members.count)
+        arena.withReadPointer { base, _ in
+            let discriminators = UnsafeBufferPointer(start: base, count: rows)
+            output.append(contentsOf: discriminators)
+            for index in 0..<rows {
+                let discriminator = discriminators[index]
+                if discriminator != 255 { counts[Int(discriminator)] += 1 }
+            }
+        }
+        arena.advanceHead(by: rows)
+        for index in members.indices {
+            try copyColumnBody(typeName: members[index].type, rows: counts[index], into: &output)
+        }
+    }
+
+    private func variantAsTuple(_ typeName: String) -> String {
+        "Tuple(\(innerType(typeName: typeName, prefix: "Variant(")))"
+    }
+
+    // Dynamic body: an 8-byte structure-version prefix, a uvarint
+    // max-dynamic-types limit, a uvarint member count, that many member
+    // type-name strings (canonical sorted order), then an embedded Variant
+    // body. The structure prefix is copied verbatim, the member type names
+    // are read to know each sub-column's type, and the embedded Variant
+    // body is copied. ClickHouse can emit non-contiguous discriminator
+    // values even on a fresh insert, so the per-member present count is
+    // derived by aligning the ascending distinct present discriminators to
+    // the member list positions, not by assuming discriminator == member
+    // index.
+    private func copyDynamicColumnBody(rows: Int, into output: inout [UInt8]) throws(ClickHouseError) {
+        if rows == 0 { return }
+        let structureVersion = try readFixedInt(UInt64.self)
+        ClickHouseWire.writeFixedInt(structureVersion, into: &output)
+        if structureVersion == 1 {
+            let maxTypes = try readUVarInt()
+            ClickHouseWire.writeUVarInt(maxTypes, into: &output)
+        }
+        let memberCount = try readUVarInt()
+        ClickHouseWire.writeUVarInt(memberCount, into: &output)
+        var memberTypes: [String] = []
+        memberTypes.reserveCapacity(Int(memberCount))
+        for _ in 0..<Int(memberCount) {
+            let name = try readString()
+            ClickHouseWire.writeString(name, into: &output)
+            memberTypes.append(name)
+        }
+        let modePrefix = try readFixedInt(UInt64.self)
+        ClickHouseWire.writeFixedInt(modePrefix, into: &output)
+        let counts = try copyDynamicDiscriminators(rows: rows, memberCount: Int(memberCount), into: &output)
+        for index in memberTypes.indices {
+            try copyColumnBody(typeName: memberTypes[index], rows: counts[index], into: &output)
+        }
+    }
+
+    // AggregateFunction column body is the per-row serialized states
+    // concatenated with no framing. The byte count is rows * the
+    // fixed per-row state width derived from the signature; signatures
+    // whose state width SwiftDX cannot determine throw here so the read
+    // never consumes the wrong number of bytes.
+    private func copyAggregateFunctionColumnBody(typeName: String, rows: Int, into output: inout [UInt8]) throws(ClickHouseError) {
+        if rows == 0 { return }
+        let signature = String(typeName.dropFirst("AggregateFunction(".count).dropLast())
+        let width = try ClickHouseAggregateStateWidth.width(signature: signature)
+        try copyFixedBytes(byteCount: rows * width, into: &output)
+    }
+
+    private func skipAggregateFunctionBody(typeName: String, rows: Int) throws(ClickHouseError) {
+        if rows == 0 { return }
+        let signature = String(typeName.dropFirst("AggregateFunction(".count).dropLast())
+        let width = try ClickHouseAggregateStateWidth.width(signature: signature)
+        try skipBytes(rows * width)
+    }
+
+    private func copyDynamicDiscriminators(rows: Int, memberCount: Int, into output: inout [UInt8]) throws(ClickHouseError) -> [Int] {
+        try ensureBytes(rows)
+        var rawDiscriminators = [UInt8](repeating: 0, count: rows)
+        arena.withReadPointer { base, _ in
+            let discriminators = UnsafeBufferPointer(start: base, count: rows)
+            output.append(contentsOf: discriminators)
+            for index in 0..<rows { rawDiscriminators[index] = discriminators[index] }
+        }
+        arena.advanceHead(by: rows)
+        return memberPresentCounts(rawDiscriminators, memberCount: memberCount)
+    }
+
+    private func memberPresentCounts(_ raw: [UInt8], memberCount: Int) -> [Int] {
+        var distinct: [UInt8] = []
+        for value in raw where value != 255 && !distinct.contains(value) {
+            distinct.append(value)
+        }
+        distinct.sort()
+        var position = [Int](repeating: -1, count: 256)
+        for index in distinct.indices where index < memberCount {
+            position[Int(distinct[index])] = index
+        }
+        var counts = [Int](repeating: 0, count: memberCount)
+        for value in raw where value != 255 {
+            let memberIndex = position[Int(value)]
+            if memberIndex >= 0 { counts[memberIndex] += 1 }
+        }
+        return counts
+    }
+
     private func columnByteWidth(typeName: String, rows: Int) throws(ClickHouseError) -> Int {
         switch typeName {
         case "UInt8", "Int8", "Bool": return rows
-        case "UInt16", "Int16", "Date": return rows * 2
-        case "UInt32", "Int32", "Float32", "DateTime", "IPv4": return rows * 4
+        case "UInt16", "Int16", "Date", "BFloat16": return rows * 2
+        case "UInt32", "Int32", "Float32", "DateTime", "IPv4", "Date32", "Time": return rows * 4
         case "UInt64", "Int64", "Float64": return rows * 8
         case "UInt128", "Int128", "UUID", "IPv6": return rows * 16
         case "UInt256", "Int256": return rows * 32
         case "String": return -1
+        case "Nothing": return rows
         default:
+            if ClickHouseIntervalKind.isKindName(typeName) { return rows * 8 }
             if typeName.hasPrefix("Enum8(") { return rows }
             if typeName.hasPrefix("Enum16(") { return rows * 2 }
             if typeName.hasPrefix("DateTime(") { return rows * 4 }
             if typeName.hasPrefix("DateTime64(") { return rows * 8 }
+            if typeName.hasPrefix("Time64(") { return rows * 8 }
             if typeName.hasPrefix("FixedString(") {
                 let widthStart = typeName.index(typeName.startIndex, offsetBy: "FixedString(".count)
                 let widthEnd = typeName.firstIndex(of: ")") ?? typeName.endIndex
                 let width = Int(typeName[widthStart..<widthEnd]) ?? 0
                 return rows * width
             }
+            if typeName.hasPrefix("Decimal") {
+                let width = try decimalByteWidth(typeName: typeName)
+                return rows * width
+            }
             throw .protocolError(stage: "columnByteWidth", message: "unsupported column type \(typeName)")
         }
+    }
+
+    private func decimalByteWidth(typeName: String) throws(ClickHouseError) -> Int {
+        if typeName.hasPrefix("Decimal32(") { return 4 }
+        if typeName.hasPrefix("Decimal64(") { return 8 }
+        if typeName.hasPrefix("Decimal128(") { return 16 }
+        if typeName.hasPrefix("Decimal256(") { return 32 }
+        if typeName.hasPrefix("Decimal(") {
+            let inner = typeName.dropFirst("Decimal(".count)
+            var precision = 0
+            for byte in inner.utf8 {
+                if byte < 0x30 || byte > 0x39 { break }
+                precision = precision * 10 + Int(byte - 0x30)
+            }
+            return ClickHouseDecimalWidth.bytes(forPrecision: UInt8(truncatingIfNeeded: precision))
+        }
+        throw .protocolError(stage: "columnByteWidth", message: "unsupported column type \(typeName)")
     }
 
     private func readExceptionPacket() throws(ClickHouseError) -> ClickHouseServerException {
