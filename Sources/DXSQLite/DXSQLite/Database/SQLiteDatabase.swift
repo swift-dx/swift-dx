@@ -96,7 +96,12 @@ public final class SQLiteDatabase: Sendable {
         }
         do {
             try await readerThreadPool.runIfActive {
-                try connection.streamRows(sql, parameters) { continuation.yield($0) }
+                try connection.streamRows(sql, parameters) { row in
+                    if case .terminated = continuation.yield(row) {
+                        return false
+                    }
+                    return true
+                }
             }
             continuation.finish()
         } catch {
@@ -105,52 +110,43 @@ public final class SQLiteDatabase: Sendable {
         await readerPool.release(connection)
     }
 
-    public func observeUpdates(_ handler: @escaping @Sendable (SQLiteChange) -> Void) async {
-        let connection = writerConnection
+    public func observeUpdates(_ handler: @escaping @Sendable (SQLiteChange) -> Void) async throws(SQLiteError) {
         let box = SQLiteUpdateHookBox(handler: handler)
-        _ = try? await writerThreadPool.runIfActive {
-            connection.setUpdateHook(box)
-        }
+        try await onWriter { $0.setUpdateHook(box) }
     }
 
-    public func observeCommits(_ handler: @escaping @Sendable () -> Void) async {
-        let connection = writerConnection
+    public func observeCommits(_ handler: @escaping @Sendable () -> Void) async throws(SQLiteError) {
         let box = SQLiteCommitHookBox(handler: handler)
-        _ = try? await writerThreadPool.runIfActive {
-            connection.setCommitHook(box)
-        }
+        try await onWriter { $0.setCommitHook(box) }
     }
 
-    public func observeRollbacks(_ handler: @escaping @Sendable () -> Void) async {
-        let connection = writerConnection
+    public func observeRollbacks(_ handler: @escaping @Sendable () -> Void) async throws(SQLiteError) {
         let box = SQLiteRollbackHookBox(handler: handler)
-        _ = try? await writerThreadPool.runIfActive {
-            connection.setRollbackHook(box)
-        }
+        try await onWriter { $0.setRollbackHook(box) }
     }
 
-    public func observeTrace(_ handler: @escaping @Sendable (String) -> Void) async {
-        let connection = writerConnection
+    public func observeTrace(_ handler: @escaping @Sendable (String) -> Void) async throws(SQLiteError) {
         let box = SQLiteTraceBox(handler)
-        _ = try? await writerThreadPool.runIfActive {
-            connection.setTrace(box)
-        }
+        try await onWriter { $0.setTrace(box) }
     }
 
-    public func observeBusy(_ handler: @escaping @Sendable (Int) -> Bool) async {
-        let connection = writerConnection
+    public func observeBusy(_ handler: @escaping @Sendable (Int) -> Bool) async throws(SQLiteError) {
         let box = SQLiteBusyBox(handler)
-        _ = try? await writerThreadPool.runIfActive {
-            connection.setBusy(box)
-        }
+        try await onWriter { $0.setBusy(box) }
     }
 
-    public func observeProgress(everyInstructions interval: Int, _ handler: @escaping @Sendable () -> Bool) async {
-        let connection = writerConnection
+    public func observeProgress(everyInstructions interval: Int, _ handler: @escaping @Sendable () -> Bool) async throws(SQLiteError) {
         let box = SQLiteProgressBox(handler)
         let step = Int32(max(1, interval))
-        _ = try? await writerThreadPool.runIfActive {
-            connection.setProgress(box, instructionInterval: step)
+        try await onWriter { $0.setProgress(box, instructionInterval: step) }
+    }
+
+    private func onWriter(_ body: @escaping @Sendable (SQLiteConnection) -> Void) async throws(SQLiteError) {
+        let connection = writerConnection
+        do {
+            try await writerThreadPool.runIfActive { body(connection) }
+        } catch {
+            throw SQLiteError.databaseClosed
         }
     }
 

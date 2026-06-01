@@ -35,7 +35,7 @@ struct SQLiteObserverTests {
         let path = NSTemporaryDirectory() + "dxsqlite-trace-\(UUID().uuidString).sqlite"
         let database = try await SQLite.connect(SQLiteConfiguration(location: .file(path: path)))
         let recorder = TraceRecorder()
-        await database.observeTrace { statement in recorder.record(statement) }
+        try await database.observeTrace { statement in recorder.record(statement) }
 
         try await database.write { writer in
             try writer.execute("CREATE TABLE t (v INTEGER)")

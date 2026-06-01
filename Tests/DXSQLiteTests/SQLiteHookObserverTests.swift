@@ -84,7 +84,7 @@ struct SQLiteHookObserverTests {
         }
 
         let counter = InvocationCounter()
-        await database.observeCommits { counter.increment() }
+        try await database.observeCommits { counter.increment() }
 
         for value in 1...3 {
             try await database.transaction { writer in
@@ -114,7 +114,7 @@ struct SQLiteHookObserverTests {
         }
 
         let counter = InvocationCounter()
-        await database.observeRollbacks { counter.increment() }
+        try await database.observeRollbacks { counter.increment() }
 
         struct DeliberateFailure: Error {}
 
@@ -142,7 +142,7 @@ struct SQLiteHookObserverTests {
         let database = try await SQLite.connect(SQLiteConfiguration(location: .file(path: path)))
 
         let log = ChangeLog()
-        await database.observeUpdates { change in log.append(change) }
+        try await database.observeUpdates { change in log.append(change) }
 
         try await database.write { writer in
             try writer.execute("CREATE TABLE product (id INTEGER PRIMARY KEY, name TEXT NOT NULL, stock INTEGER NOT NULL)")
@@ -178,7 +178,7 @@ struct SQLiteHookObserverTests {
         }
 
         let log = ChangeLog()
-        await database.observeUpdates { change in log.append(change) }
+        try await database.observeUpdates { change in log.append(change) }
 
         let affected = try await database.write { writer in
             try writer.mutate("UPDATE item SET price = price + 50", parameters: [])
@@ -210,7 +210,7 @@ struct SQLiteHookObserverTests {
         }
 
         let gate = AbortingProgressGate(allowedCalls: 2)
-        await database.observeProgress(everyInstructions: 1) { gate.shouldContinue() }
+        try await database.observeProgress(everyInstructions: 1) { gate.shouldContinue() }
 
         await #expect(throws: SQLiteError.self) {
             try await database.write { writer in
@@ -229,7 +229,7 @@ struct SQLiteHookObserverTests {
         let path = Self.temporaryPath()
         let database = try await SQLite.connect(SQLiteConfiguration(location: .file(path: path)))
 
-        await database.observeBusy { _ in true }
+        try await database.observeBusy { _ in true }
 
         try await database.write { writer in
             try writer.execute("CREATE TABLE customer (id INTEGER PRIMARY KEY, email TEXT NOT NULL)")

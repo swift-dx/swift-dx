@@ -17,3 +17,16 @@ public enum ColumnType: Sendable, Equatable {
     case text
     case blob
 }
+
+extension ColumnType: CustomStringConvertible {
+
+    public var description: String {
+        switch self {
+        case .null: "null"
+        case .integer: "integer"
+        case .real: "real"
+        case .text: "text"
+        case .blob: "blob"
+        }
+    }
+}

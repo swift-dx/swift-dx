@@ -35,7 +35,7 @@ struct SQLiteHookTests {
         let path = NSTemporaryDirectory() + "dxsqlite-hook-\(UUID().uuidString).sqlite"
         let database = try await SQLite.connect(SQLiteConfiguration(location: .file(path: path)))
         let recorder = ChangeRecorder()
-        await database.observeUpdates { change in recorder.record(change) }
+        try await database.observeUpdates { change in recorder.record(change) }
 
         try await database.write { writer in
             try writer.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER)")

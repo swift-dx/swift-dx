@@ -21,9 +21,11 @@ import CSQLite
 public final class SQLiteBlob {
 
     private let handle: OpaquePointer
+    private let connection: OpaquePointer
 
-    init(handle: OpaquePointer) {
+    init(handle: OpaquePointer, connection: OpaquePointer) {
         self.handle = handle
+        self.connection = connection
     }
 
     public var count: Int {
@@ -38,7 +40,7 @@ public final class SQLiteBlob {
             sqlite3_blob_read(handle, destination.baseAddress, length, start)
         }
         guard code == SQLITE_OK else {
-            throw SQLiteError.blobFailed(operation: "read", code: code, message: String(cString: sqlite3_errstr(code)))
+            throw SQLiteError.blobFailed(operation: "read", code: code, message: String(cString: sqlite3_errmsg(connection)))
         }
         return buffer
     }
@@ -50,7 +52,7 @@ public final class SQLiteBlob {
             sqlite3_blob_write(handle, source.baseAddress, length, start)
         }
         guard code == SQLITE_OK else {
-            throw SQLiteError.blobFailed(operation: "write", code: code, message: String(cString: sqlite3_errstr(code)))
+            throw SQLiteError.blobFailed(operation: "write", code: code, message: String(cString: sqlite3_errmsg(connection)))
         }
     }
 

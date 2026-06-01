@@ -73,7 +73,7 @@ final class SQLiteConnection: @unchecked Sendable {
         return try statement.collectRows()
     }
 
-    func streamRows(_ sql: String, _ parameters: [SQLiteValue], onRow: (SQLiteRow) -> Void) throws(SQLiteError) {
+    func streamRows(_ sql: String, _ parameters: [SQLiteValue], onRow: (SQLiteRow) -> Bool) throws(SQLiteError) {
         let statement = try prepare(sql)
         try statement.bindAll(parameters)
         try statement.forEachRow(onRow)
@@ -125,11 +125,8 @@ final class SQLiteConnection: @unchecked Sendable {
         guard let opened = blobHandle else {
             throw SQLiteError.blobFailed(operation: "open \(table).\(column)", code: code, message: String(cString: sqlite3_errmsg(handle)))
         }
-        let blob = SQLiteBlob(handle: opened)
+        let blob = SQLiteBlob(handle: opened, connection: handle)
         defer { blob.close() }
-        guard code == SQLITE_OK else {
-            throw SQLiteError.blobFailed(operation: "open \(table).\(column)", code: code, message: String(cString: sqlite3_errmsg(handle)))
-        }
         return try body(blob)
     }
 

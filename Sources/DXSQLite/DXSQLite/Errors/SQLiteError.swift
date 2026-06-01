@@ -55,7 +55,7 @@ extension SQLiteError: CustomStringConvertible {
         case .sessionFailed(let operation, let code, let message): "session \(operation) failed: \(message) (code \(code))"
         case .unexpectedColumnType(let columnIndex, let rawType): "column \(columnIndex) reported unknown SQLite type code \(rawType)"
         case .columnNotFound(let name): "no column named \(name) in the result row"
-        case .valueTypeMismatch(let expected, let actual): "expected a \(expected) value but the column held \(actual)"
+        case .valueTypeMismatch(let expected, let actual): "expected \(expected) but found \(actual)"
         case .decodingFailed(let type, let reason): "failed to decode \(type) from the row: \(reason)"
         case .encodingFailed(let type, let reason): "failed to encode \(type) to JSON: \(reason)"
         case .poolExhausted(let maxReaders): "reader pool exhausted at \(maxReaders) connections"

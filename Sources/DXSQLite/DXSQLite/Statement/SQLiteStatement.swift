@@ -64,14 +64,17 @@ final class SQLiteStatement: @unchecked Sendable {
 
     func collectRows() throws(SQLiteError) -> [SQLiteRow] {
         var rows: [SQLiteRow] = []
-        try forEachRow { rows.append($0) }
+        try forEachRow {
+            rows.append($0)
+            return true
+        }
         return rows
     }
 
-    func forEachRow(_ body: (SQLiteRow) -> Void) throws(SQLiteError) {
+    func forEachRow(_ body: (SQLiteRow) -> Bool) throws(SQLiteError) {
         let names = columnNames()
         while try step() == .row {
-            body(try readRow(names: names))
+            guard body(try readRow(names: names)) else { return }
         }
     }
 

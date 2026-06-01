@@ -32,7 +32,18 @@ public struct SQLiteConfiguration: Sendable {
     public let virtualTables: [any SQLiteTableProvider]
     public let logger: Logger
 
-    public init(location: SQLiteLocation, maxReaders: Int = 4, busyTimeoutMilliseconds: Int = 5_000, tuning: SQLiteTuning = SQLiteTuning(), authorization: SQLiteAuthorizationPolicy = .unrestricted, functions: [SQLiteFunction] = [], aggregates: [SQLiteAggregate] = [], collations: [SQLiteCollation] = [], virtualTables: [any SQLiteTableProvider] = [], logger: Logger = Logger(label: "swift.dx.sqlite")) {
+    public init(
+        location: SQLiteLocation,
+        maxReaders: Int = 4,
+        busyTimeoutMilliseconds: Int = 5_000,
+        tuning: SQLiteTuning = SQLiteTuning(),
+        authorization: SQLiteAuthorizationPolicy = .unrestricted,
+        functions: [SQLiteFunction] = [],
+        aggregates: [SQLiteAggregate] = [],
+        collations: [SQLiteCollation] = [],
+        virtualTables: [any SQLiteTableProvider] = [],
+        logger: Logger = Logger(label: "swift.dx.sqlite")
+    ) {
         self.location = location
         self.maxReaders = maxReaders
         self.busyTimeoutMilliseconds = busyTimeoutMilliseconds
