@@ -61,6 +61,61 @@ final class PostgresConnection: @unchecked Sendable {
         }
     }
 
+    // Sends every parameter set for one SQL string in a single write, then reads
+    // their results in order. Each statement carries its own Sync, so the server
+    // runs them as independent autocommit statements and an error in one is
+    // isolated to that result rather than discarding the batch. The whole batch
+    // costs one network round-trip instead of one per statement, which is what lets
+    // a pipelined insert outrun a client that waits for each row's acknowledgement.
+    // collectResult drains each statement through its ReadyForQuery even on error,
+    // so a mid-batch failure leaves the connection in sync for the next caller; the
+    // first captured error is raised after the whole batch is drained.
+    func pipelineExtended(sql: String, parameterSets: [[PostgresCell]]) async throws(PostgresError) -> [PostgresQueryResult] {
+        try await runRequest {
+            try await self.runPipeline(sql: sql, parameterSets: parameterSets)
+        }
+    }
+
+    private func runPipeline(sql: String, parameterSets: [[PostgresCell]]) async throws(PostgresError) -> [PostgresQueryResult] {
+        let plan = preparedStatements.withLockedValue { $0.plan(for: sql) }
+        do {
+            writePipeline(plan: plan, sql: sql, parameterSets: parameterSets)
+            return try await collectPipeline(count: parameterSets.count)
+        } catch {
+            preparedStatements.withLockedValue { $0.evict(sql) }
+            throw error
+        }
+    }
+
+    private func writePipeline(plan: PreparedStatementCache.Plan, sql: String, parameterSets: [[PostgresCell]]) {
+        let allocator = channel.allocator
+        var buffer = allocator.buffer(capacity: 64 * parameterSets.count + 128)
+        appendParseIfNeeded(plan: plan, sql: sql, into: &buffer, allocator: allocator)
+        let statement = plan.statementName
+        for parameters in parameterSets {
+            appendMessage(FrontendMessage.bind(portalName: "", statementName: statement, parameters: parameters, allocator: allocator), to: &buffer)
+            appendMessage(FrontendMessage.describePortal(name: "", allocator: allocator), to: &buffer)
+            appendMessage(FrontendMessage.execute(portalName: "", maxRows: 0, allocator: allocator), to: &buffer)
+            appendMessage(FrontendMessage.sync(allocator: allocator), to: &buffer)
+        }
+        write(buffer)
+    }
+
+    private func collectPipeline(count: Int) async throws(PostgresError) -> [PostgresQueryResult] {
+        var results: [PostgresQueryResult] = []
+        results.reserveCapacity(count)
+        var captured = CapturedPipelineError.none
+        for _ in 0..<count {
+            do {
+                results.append(try await collectResult())
+            } catch let error {
+                captured.captureFirst(error)
+            }
+        }
+        try captured.throwIfPresent()
+        return results
+    }
+
     private func runExtended(sql: String, parameters: [PostgresCell]) async throws(PostgresError) -> PostgresQueryResult {
         let plan = preparedStatements.withLockedValue { $0.plan(for: sql) }
         do {

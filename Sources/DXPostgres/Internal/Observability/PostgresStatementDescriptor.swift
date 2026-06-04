@@ -23,4 +23,16 @@ enum PostgresStatementDescriptor {
         }
         return "QUERY"
     }
+
+    // Leading keywords whose statements have no persistent effect, so replaying one
+    // after an ambiguous connection failure cannot double-apply anything. The set is
+    // deliberately conservative: anything not listed — INSERT, UPDATE, DELETE,
+    // MERGE, CALL, DO, COPY, every DDL verb, a data-modifying WITH, and EXPLAIN
+    // (because EXPLAIN ANALYZE executes its target) — is treated as a write and is
+    // never retried once it may have reached the server.
+    private static let readOnlyOperations: Set<String> = ["SELECT", "SHOW", "TABLE", "VALUES", "FETCH"]
+
+    static func isReadOnly(_ statement: String) -> Bool {
+        readOnlyOperations.contains(operation(of: statement))
+    }
 }

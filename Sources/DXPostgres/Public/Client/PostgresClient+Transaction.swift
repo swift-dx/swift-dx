@@ -28,13 +28,49 @@ extension PostgresClient {
     /// ```
     public func withTransaction<Result: Sendable>(_ body: @Sendable (PostgresTransaction) async throws -> Result) async throws -> Result {
         try await pool.withConnection { connection in
-            try await Self.runTransaction(on: connection, body)
+            try await Self.runTransaction(on: connection, setup: [], body)
         }
     }
 
-    private static func runTransaction<Result: Sendable>(on connection: PostgresConnection, _ body: @Sendable (PostgresTransaction) async throws -> Result) async throws -> Result {
+    /// Runs `body` inside a single transaction whose `COMMIT` is held to the given
+    /// ``PostgresDurability``. The level is applied with `SET LOCAL
+    /// synchronous_commit` after `BEGIN`, so it governs only this transaction and
+    /// reverts when it ends; the pooled connection carries no durability state into
+    /// the next caller. Use ``synchronous`` for writes that must survive a crash
+    /// and ``asynchronous`` for high-volume, loss-tolerant writes; in both cases the
+    /// transaction commits only on real server confirmation, or throws.
+    public func withTransaction<Result: Sendable>(durability: PostgresDurability, _ body: @Sendable (PostgresTransaction) async throws -> Result) async throws -> Result {
+        try await pool.withConnection { connection in
+            try await Self.runTransaction(on: connection, setup: ["SET LOCAL synchronous_commit = \(durability.synchronousCommitValue)"], body)
+        }
+    }
+
+    /// Runs one statement at the given durability, wrapping it in a transaction so
+    /// `SET LOCAL synchronous_commit` applies. This is the single-write counterpart
+    /// to ``withTransaction(durability:_:)``: the statement commits only when the
+    /// server confirms it to the chosen level, or throws.
+    public func execute(_ sql: String, durability: PostgresDurability) async throws(PostgresError) -> PostgresQueryResult {
+        try await PostgresError.bridge {
+            try await self.withTransaction(durability: durability) { transaction in
+                try await transaction.query(sql)
+            }
+        }
+    }
+
+    public func execute(_ sql: String, binding parameters: [any PostgresEncodable], durability: PostgresDurability) async throws(PostgresError) -> PostgresQueryResult {
+        try await PostgresError.bridge {
+            try await self.withTransaction(durability: durability) { transaction in
+                try await transaction.query(sql, binding: parameters)
+            }
+        }
+    }
+
+    private static func runTransaction<Result: Sendable>(on connection: PostgresConnection, setup: [String], _ body: @Sendable (PostgresTransaction) async throws -> Result) async throws -> Result {
         _ = try await connection.simpleQuery("BEGIN")
         do {
+            for statement in setup {
+                _ = try await connection.simpleQuery(statement)
+            }
             let result = try await body(PostgresTransaction(connection: connection))
             _ = try await connection.simpleQuery("COMMIT")
             return result

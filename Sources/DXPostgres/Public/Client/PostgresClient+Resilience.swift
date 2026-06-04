@@ -32,8 +32,9 @@ extension PostgresClient {
         observability.logger.emit(.queryStarted(statement: statement))
         let start = NIODeadline.now()
         do {
+            let idempotent = PostgresStatementDescriptor.isReadOnly(statement)
             let value = try await traced(statement) {
-                try await self.executeWithRetries(operation)
+                try await self.executeWithRetries(idempotent: idempotent, operation)
             }
             recordCompletion(statement, start: start)
             return value
@@ -66,9 +67,9 @@ extension PostgresClient {
         }
     }
 
-    private func executeWithRetries<Value: Sendable>(_ operation: @Sendable () async throws -> Value) async throws -> Value {
+    private func executeWithRetries<Value: Sendable>(idempotent: Bool, _ operation: @Sendable () async throws -> Value) async throws -> Value {
         guard resilience.retryTransientFailures else { return try await operation() }
-        return try await retryLoop(operation)
+        return try await retryLoop(idempotent: idempotent, operation)
     }
 
     private func recordCompletion(_ statement: String, start: NIODeadline) {
@@ -89,23 +90,33 @@ extension PostgresClient {
         UInt64(max((NIODeadline.now() - start).nanoseconds, 0))
     }
 
-    private func retryLoop<Value: Sendable>(_ operation: @Sendable () async throws -> Value) async throws(PostgresError) -> Value {
+    private func retryLoop<Value: Sendable>(idempotent: Bool, _ operation: @Sendable () async throws -> Value) async throws(PostgresError) -> Value {
         let deadline = NIODeadline.now() + requestTimeout
         var delay = resilience.reconnectBaseDelay
         while true {
             do {
                 return try await operation()
             } catch {
-                try await retryOrThrow(PostgresError.translate(error), deadline: deadline, delay: &delay)
+                try await retryOrThrow(PostgresError.translate(error), idempotent: idempotent, deadline: deadline, delay: &delay)
             }
         }
     }
 
-    private func retryOrThrow(_ error: PostgresError, deadline: NIODeadline, delay: inout TimeAmount) async throws(PostgresError) {
-        guard error.isTransient, NIODeadline.now() < deadline else { throw error }
+    private func retryOrThrow(_ error: PostgresError, idempotent: Bool, deadline: NIODeadline, delay: inout TimeAmount) async throws(PostgresError) {
+        guard canRetry(error, idempotent: idempotent), NIODeadline.now() < deadline else { throw error }
         observability.metrics.recordRetry()
         observability.logger.emit(.retryScheduled(reason: "\(error)", delayNanos: UInt64(max(delay.nanoseconds, 0))), level: .warning)
         try await backoff(&delay)
+    }
+
+    // A failure is retried only when retrying cannot change a committed outcome.
+    // Acquisition and server-rollback failures are never ambiguous, so they retry
+    // for any statement. Ambiguous failures — a drop or timeout after the statement
+    // reached the wire — retry only for read-only statements, so a single INSERT
+    // whose acknowledgement was lost fails fast instead of double-applying.
+    private func canRetry(_ error: PostgresError, idempotent: Bool) -> Bool {
+        guard error.isTransient else { return false }
+        return !error.isAmbiguous || idempotent
     }
 
     private func backoff(_ delay: inout TimeAmount) async throws(PostgresError) {

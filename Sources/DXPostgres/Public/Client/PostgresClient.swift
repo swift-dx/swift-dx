@@ -62,7 +62,7 @@ public final class PostgresClient: Sendable {
     }
 
     public func poolStats() async -> PostgresPoolStats {
-        await pool.stats()
+        pool.stats()
     }
 
     /// A cumulative snapshot of query, error, retry, pool-timeout, and
@@ -98,7 +98,7 @@ public final class PostgresClient: Sendable {
 
     private func releaseAll(_ connections: [PostgresConnection]) async {
         for connection in connections {
-            await pool.release(connection)
+            pool.release(connection)
         }
     }
 

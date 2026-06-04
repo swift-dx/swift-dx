@@ -96,7 +96,7 @@ final class PostgresRowStreamDriver: @unchecked Sendable {
 
     private func complete() async {
         if case .found(let connection) = claimConnection() {
-            await pool.release(connection)
+            pool.release(connection)
         }
         continuation.finish()
     }
@@ -115,7 +115,7 @@ final class PostgresRowStreamDriver: @unchecked Sendable {
 
     private func closeAndRelease(_ connection: PostgresConnection) async {
         await connection.close()
-        await pool.release(connection)
+        pool.release(connection)
     }
 
     private static func mapError(_ error: Error) -> PostgresError {

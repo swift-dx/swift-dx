@@ -275,6 +275,14 @@
         "S011"
       ],
       "reason": "The @convention(c) authorizer thunk SQLite invokes takes void* user-data and five const char* action operands imported by Swift as Optional pointers (UnsafeMutableRawPointer?, UnsafePointer<CChar>?), each bound via guard let and never surfacing on the public API. makeAuthorizerAction dispatches on the SQLite authorizer action-code Int32 (SQLITE_CREATE_TABLE, SQLITE_READ, and so on); the exhaustive switch maps each of the ~33 stable codes to its typed SQLiteAuthorizerAction case, returning notFound for any unrecognized code so the thunk can deny it. Each branch is a single value construction; the switch is the one authoritative place the C action contract is read."
+    },
+    {
+      "path": "Sources/DXPostgres/Internal/Connection/BlockingPostgresConnection.swift",
+      "rules": [
+        "S002",
+        "S011"
+      ],
+      "reason": "POSIX blocking-socket transport for the PostgreSQL v3 protocol. getaddrinfo's C signature mandates the inout UnsafeMutablePointer<addrinfo>? out-parameter and the ai_next linked-list traversal is over Optional node pointers (third-party C API contract); each is bound via guard let / while let on the next line and never surfaces on the public API. answer(_:username:password:) dispatches on the authentication-method enum the server selected (ok ends the exchange, cleartext/md5 send a password message, SASL runs the SCRAM sub-exchange, an unsupported method fails with its code); it is the synchronous mirror of the exempted respondToAuthentication in PostgresConnection+Connect.swift, a single-purpose credential-flow router whose every branch delegates to one small helper."
     }
   ]
 }

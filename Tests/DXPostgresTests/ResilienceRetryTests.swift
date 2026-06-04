@@ -58,6 +58,52 @@ import Testing
         await client.shutdown()
     }
 
+    // A write whose connection drops mid-flight has an unknown outcome: the server
+    // may have committed the row before the acknowledgement was lost. Replaying it
+    // could insert a duplicate, so it fails fast after a single attempt rather than
+    // retrying, even though the same failure is retryable for a read.
+    @Test func doesNotRetryWriteAfterAmbiguousConnectionLoss() async {
+        let client = makeClient(PostgresResilience(retryTransientFailures: true, reconnectBaseDelay: .milliseconds(1), reconnectMaxDelay: .milliseconds(4)))
+        let attempts = ManagedAtomic<Int>(0)
+        await #expect(throws: PostgresError.connectionClosed) {
+            try await client.withResilience(statement: "INSERT INTO t (id) VALUES (1)") { () throws -> Int in
+                attempts.wrappingIncrement(ordering: .relaxed)
+                throw PostgresError.connectionClosed
+            }
+        }
+        #expect(attempts.load(ordering: .relaxed) == 1)
+        #expect(client.metrics().retriesTotal == 0)
+        await client.shutdown()
+    }
+
+    // A read carries no persistent effect, so replaying it after an ambiguous
+    // transport failure is safe and lets the loop heal a momentarily dead connection.
+    @Test func retriesReadAfterAmbiguousConnectionLoss() async throws {
+        let client = makeClient(PostgresResilience(retryTransientFailures: true, reconnectBaseDelay: .milliseconds(1), reconnectMaxDelay: .milliseconds(4)))
+        let attempts = ManagedAtomic<Int>(0)
+        let value = try await client.withResilience(statement: "SELECT id FROM t") { () throws -> Int in
+            let attempt = attempts.wrappingIncrementThenLoad(ordering: .relaxed)
+            guard attempt >= 2 else { throw PostgresError.transportError(reason: "connection reset by peer") }
+            return attempt
+        }
+        #expect(value == 2)
+        await client.shutdown()
+    }
+
+    // Acquisition failures occur before any statement reaches the server, so even a
+    // write retries them safely: nothing could have been applied yet.
+    @Test func retriesWriteOnAcquisitionFailure() async throws {
+        let client = makeClient(PostgresResilience(retryTransientFailures: true, reconnectBaseDelay: .milliseconds(1), reconnectMaxDelay: .milliseconds(4)))
+        let attempts = ManagedAtomic<Int>(0)
+        let value = try await client.withResilience(statement: "INSERT INTO t (id) VALUES (1)") { () throws -> Int in
+            let attempt = attempts.wrappingIncrementThenLoad(ordering: .relaxed)
+            guard attempt >= 2 else { throw PostgresError.poolExhausted(maxConnections: 4) }
+            return attempt
+        }
+        #expect(value == 2)
+        await client.shutdown()
+    }
+
     @Test func disabledResilienceDoesNotRetry() async {
         let client = makeClient(.disabled)
         let attempts = ManagedAtomic<Int>(0)

@@ -103,12 +103,19 @@ enum FrontendMessage {
 
     static func parse(statementName: String, sql: String, allocator: ByteBufferAllocator) -> ByteBuffer {
         var buffer = allocator.buffer(capacity: sql.utf8.count + statementName.utf8.count + 12)
+        appendParse(into: &buffer, statementName: statementName, sql: sql)
+        return buffer
+    }
+
+    // Append-in-place variants write one message directly into a shared buffer,
+    // so the extended-query path builds Parse/Bind/Describe/Execute/Sync as a
+    // single allocation instead of one throwaway buffer per message plus a copy.
+    static func appendParse(into buffer: inout ByteBuffer, statementName: String, sql: String) {
         let lengthIndex = buffer.writeMessageLengthPrefix(tag: tagParse)
         buffer.writeCString(statementName)
         buffer.writeCString(sql)
         buffer.writeInteger(Int16(0))
         buffer.backpatchLength(at: lengthIndex)
-        return buffer
     }
 
     // Binds parameters in text format and requests results in text format, so a
@@ -120,6 +127,11 @@ enum FrontendMessage {
     // choice and always returns text, so the row decoders handle both formats.
     static func bind(portalName: String, statementName: String, parameters: [PostgresCell], allocator: ByteBufferAllocator) -> ByteBuffer {
         var buffer = allocator.buffer(capacity: 64)
+        appendBind(into: &buffer, portalName: portalName, statementName: statementName, parameters: parameters)
+        return buffer
+    }
+
+    static func appendBind(into buffer: inout ByteBuffer, portalName: String, statementName: String, parameters: [PostgresCell]) {
         let lengthIndex = buffer.writeMessageLengthPrefix(tag: tagBind)
         buffer.writeCString(portalName)
         buffer.writeCString(statementName)
@@ -129,7 +141,6 @@ enum FrontendMessage {
         buffer.writeInteger(Int16(1))
         buffer.writeInteger(binaryFormatCode)
         buffer.backpatchLength(at: lengthIndex)
-        return buffer
     }
 
     private static func writeBindParameters(into buffer: inout ByteBuffer, parameters: [PostgresCell]) {
@@ -158,24 +169,41 @@ enum FrontendMessage {
 
     private static func describe(target: UInt8, name: String, allocator: ByteBufferAllocator) -> ByteBuffer {
         var buffer = allocator.buffer(capacity: name.utf8.count + 8)
+        appendDescribe(into: &buffer, target: target, name: name)
+        return buffer
+    }
+
+    static func appendDescribePortal(into buffer: inout ByteBuffer, name: String) {
+        appendDescribe(into: &buffer, target: describePortalTarget, name: name)
+    }
+
+    private static func appendDescribe(into buffer: inout ByteBuffer, target: UInt8, name: String) {
         let lengthIndex = buffer.writeMessageLengthPrefix(tag: tagDescribe)
         buffer.writeInteger(target)
         buffer.writeCString(name)
         buffer.backpatchLength(at: lengthIndex)
-        return buffer
     }
 
     static func execute(portalName: String, maxRows: Int32, allocator: ByteBufferAllocator) -> ByteBuffer {
         var buffer = allocator.buffer(capacity: portalName.utf8.count + 12)
+        appendExecute(into: &buffer, portalName: portalName, maxRows: maxRows)
+        return buffer
+    }
+
+    static func appendExecute(into buffer: inout ByteBuffer, portalName: String, maxRows: Int32) {
         let lengthIndex = buffer.writeMessageLengthPrefix(tag: tagExecute)
         buffer.writeCString(portalName)
         buffer.writeInteger(maxRows)
         buffer.backpatchLength(at: lengthIndex)
-        return buffer
     }
 
     static func sync(allocator: ByteBufferAllocator) -> ByteBuffer {
         emptyBody(tag: tagSync, allocator: allocator)
+    }
+
+    static func appendSync(into buffer: inout ByteBuffer) {
+        let lengthIndex = buffer.writeMessageLengthPrefix(tag: tagSync)
+        buffer.backpatchLength(at: lengthIndex)
     }
 
     static func terminate(allocator: ByteBufferAllocator) -> ByteBuffer {

@@ -29,4 +29,21 @@ extension PostgresError {
             false
         }
     }
+
+    // Whether the failure can fire after a statement has already reached the
+    // server, leaving its outcome unknown: the connection may have dropped between
+    // the server committing the write and the acknowledgement reaching the client.
+    // Retrying such a failure could double-apply a non-idempotent statement, so it
+    // is retried only for read-only statements that carry no persistent effect.
+    // Connection-acquisition failures (connectFailed, poolExhausted) and server
+    // errors that rolled the statement back are NOT ambiguous — nothing was
+    // applied — so they stay safe to retry for any statement.
+    var isAmbiguous: Bool {
+        switch self {
+        case .connectionClosed, .transportError, .timedOut:
+            true
+        case .connectFailed, .poolExhausted, .server, .handshakeFailed, .authenticationFailed, .unsupportedAuthentication, .tlsNotSupportedByServer, .protocolError, .poolShutdown, .poolHasNoEndpoints, .columnIndexOutOfRange, .columnNameNotFound, .columnIsNull, .typeDecodingFailed, .parameterCountMismatch, .jsonEncodingFailed, .jsonDecodingFailed, .utf8DecodingFailed, .cancelled, .noCurrentClient:
+            false
+        }
+    }
 }
