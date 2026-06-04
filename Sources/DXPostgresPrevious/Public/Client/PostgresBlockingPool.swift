@@ -38,11 +38,12 @@ public final class PostgresBlockingPool: @unchecked Sendable {
         self.workers = workers
     }
 
-    public func queryScalarInt64(_ sql: String, value: Int64) async throws(PostgresError) -> Int64 {
+    public func query(_ sql: String, binding parameters: [any PostgresEncodable]) async throws(PostgresError) -> PostgresQueryResult {
+        let cells = try PostgresParameterEncoding.cells(from: parameters)
         let index = Int(cursor.wrappingAdd(1, ordering: .relaxed).oldValue % UInt64(workers.count))
         do {
             return try await withUnsafeThrowingContinuation { continuation in
-                workers[index].submitScalar(BlockingConnectionWorker.ScalarWork(sql: sql, value: value, continuation: continuation))
+                workers[index].submit(BlockingConnectionWorker.Work(sql: sql, parameters: cells, continuation: continuation))
             }
         } catch let error as PostgresError {
             throw error

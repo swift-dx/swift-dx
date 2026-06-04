@@ -9,37 +9,49 @@
 //
 //===----------------------------------------------------------------------===//
 
-import DXCore
 import Foundation
-import NIOCore
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
 
 // Owns one blocking connection and the single thread that drives it. Callers
 // submit work from any task; the thread drains the whole pending queue per wake
 // and runs each query back-to-back on its connection, resuming each waiter as the
-// result lands. Draining in batches means the lock and the wake are paid once per
-// burst rather than once per query, so under load the thread does nothing but
-// back-to-back round-trips — the property that lets a serial blocking connection
-// reach the same throughput as the synchronous C client.
+// result lands. Three properties keep the async-to-sync hand-off lean: the queue
+// is double-buffered so a drain swaps two arrays rather than copying the pending
+// one (no per-batch allocation, no per-item retain); the wake is signalled only on
+// the idle-to-busy transition, so a thread already draining is never woken
+// redundantly; and the queue is guarded by a raw pthread mutex and condition
+// variable, the bare POSIX primitive with no Foundation-wrapper overhead on the
+// per-query submit/wait. Under load the thread does nothing but back-to-back
+// round-trips.
 //
-// `@unchecked Sendable` is sound because all mutable state is guarded by the
-// condition's lock, and the connection is only ever touched by the owning thread.
+// `@unchecked Sendable` is sound because all mutable state is guarded by the mutex,
+// and the connection is only ever touched by the owning thread.
 final class BlockingConnectionWorker: @unchecked Sendable {
 
-    struct Work {
+    struct ScalarWork {
 
         let sql: String
-        let parameters: [PostgresCell]
-        let continuation: UnsafeContinuation<PostgresQueryResult, Error>
+        let value: Int64
+        let continuation: UnsafeContinuation<Int64, Error>
     }
 
     private let connection: BlockingPostgresConnection
-    private let condition = NSCondition()
-    private var pending: [Work] = []
+    private let mutex = UnsafeMutablePointer<pthread_mutex_t>.allocate(capacity: 1)
+    private let workAvailable = UnsafeMutablePointer<pthread_cond_t>.allocate(capacity: 1)
+    private var pendingScalar: [ScalarWork] = []
+    private var drainScalar: [ScalarWork] = []
     private var stopped = false
 
     init(connection: BlockingPostgresConnection) {
         self.connection = connection
-        pending.reserveCapacity(1024)
+        pthread_mutex_init(mutex, nil)
+        pthread_cond_init(workAvailable, nil)
+        pendingScalar.reserveCapacity(1024)
+        drainScalar.reserveCapacity(1024)
     }
 
     func start() {
@@ -48,51 +60,53 @@ final class BlockingConnectionWorker: @unchecked Sendable {
         thread.start()
     }
 
-    func submit(_ work: Work) {
-        condition.lock()
-        pending.append(work)
-        condition.signal()
-        condition.unlock()
+    func submitScalar(_ work: ScalarWork) {
+        pthread_mutex_lock(mutex)
+        let wasIdle = pendingScalar.isEmpty
+        pendingScalar.append(work)
+        if wasIdle { pthread_cond_signal(workAvailable) }
+        pthread_mutex_unlock(mutex)
     }
 
     func stop() {
-        condition.lock()
+        pthread_mutex_lock(mutex)
         stopped = true
-        condition.broadcast()
-        condition.unlock()
+        pthread_cond_broadcast(workAvailable)
+        pthread_mutex_unlock(mutex)
     }
 
     private func run() {
-        while case .found(let batch) = waitForBatch() {
-            for work in batch {
-                execute(work)
-            }
+        while swapInPendingWork() {
+            for work in drainScalar { executeScalar(work) }
+            drainScalar.removeAll(keepingCapacity: true)
         }
         connection.close()
     }
 
-    private func waitForBatch() -> Lookup<[Work]> {
-        condition.lock()
-        defer { condition.unlock() }
-        while shouldKeepWaiting() {
-            condition.wait()
+    private func swapInPendingWork() -> Bool {
+        pthread_mutex_lock(mutex)
+        defer { pthread_mutex_unlock(mutex) }
+        while pendingScalar.isEmpty && !stopped {
+            pthread_cond_wait(workAvailable, mutex)
         }
-        guard !pending.isEmpty else { return .notFound }
-        let batch = pending
-        pending.removeAll(keepingCapacity: true)
-        return .found(batch)
+        if pendingScalar.isEmpty { return false }
+        swap(&pendingScalar, &drainScalar)
+        return true
     }
 
-    private func shouldKeepWaiting() -> Bool {
-        pending.isEmpty && !stopped
-    }
-
-    private func execute(_ work: Work) {
+    private func executeScalar(_ work: ScalarWork) {
         do {
-            let result = try connection.query(work.sql, parameters: work.parameters)
-            work.continuation.resume(returning: result)
+            let value = try connection.queryScalarInt64Inline(work.sql, value: work.value)
+            work.continuation.resume(returning: value)
         } catch {
             work.continuation.resume(throwing: error)
         }
+    }
+
+    deinit {
+        pthread_mutex_destroy(mutex)
+        pthread_cond_destroy(workAvailable)
+        mutex.deallocate()
+        workAvailable.deallocate()
     }
 }

@@ -29,19 +29,23 @@ import NIOCore
 // threads at once.
 final class BlockingPostgresConnection: @unchecked Sendable {
 
+    private static let initialReadBufferBytes = 16 * 1024
+    private static let initialWriteScratchBytes = 512
+    private static let receiveChunkBytes = 64 * 1024
+
     private let descriptor: Int32
     private let allocator = ByteBufferAllocator()
     private var readBuffer: ByteBuffer
     private var writeScratch: ByteBuffer
-    private var scratch: [UInt8]
     private var preparedStatements: [String: String] = [:]
     private var statementCounter: UInt64 = 0
+    private var lastInlineSQL: String = ""
+    private var lastInlineName: String = ""
 
     private init(descriptor: Int32) {
         self.descriptor = descriptor
-        self.readBuffer = ByteBufferAllocator().buffer(capacity: 16 * 1024)
-        self.writeScratch = ByteBufferAllocator().buffer(capacity: 512)
-        self.scratch = [UInt8](repeating: 0, count: 64 * 1024)
+        self.readBuffer = allocator.buffer(capacity: Self.initialReadBufferBytes)
+        self.writeScratch = allocator.buffer(capacity: Self.initialWriteScratchBytes)
     }
 
     static func connect(host: String, port: Int, username: String, password: String, database: String, applicationName: String) throws(PostgresError) -> BlockingPostgresConnection {
@@ -61,26 +65,18 @@ final class BlockingPostgresConnection: @unchecked Sendable {
         _ = Glibc.close(descriptor)
     }
 
-    // Sends one fully-built wire buffer, looping until every byte is written.
+    // Sends one fully-built wire buffer straight from its storage (no [UInt8] copy).
     func writeAll(_ buffer: ByteBuffer) throws(PostgresError) {
-        var view = buffer
-        guard let bytes = view.readBytes(length: view.readableBytes) else { return }
-        try sendAll(bytes)
-    }
-
-    private func sendAll(_ bytes: [UInt8]) throws(PostgresError) {
-        var offset = 0
-        while offset < bytes.count {
-            offset += try sendChunk(bytes, from: offset)
+        var failed = false
+        buffer.withUnsafeReadableBytes { raw in
+            var offset = 0
+            while offset < raw.count {
+                let written = send(descriptor, raw.baseAddress?.advanced(by: offset), raw.count - offset, Int32(MSG_NOSIGNAL))
+                if written <= 0 { failed = true; return }
+                offset += written
+            }
         }
-    }
-
-    private func sendChunk(_ bytes: [UInt8], from offset: Int) throws(PostgresError) -> Int {
-        let written = bytes.withUnsafeBytes { raw in
-            send(descriptor, raw.baseAddress?.advanced(by: offset), raw.count - offset, Int32(MSG_NOSIGNAL))
-        }
-        guard written > 0 else { throw PostgresError.transportError(reason: "blocking send failed") }
-        return written
+        if failed { throw PostgresError.transportError(reason: "blocking send failed") }
     }
 
     // Returns the next decoded backend message, refilling from the socket only
@@ -99,11 +95,12 @@ final class BlockingPostgresConnection: @unchecked Sendable {
     }
 
     private func fillReadBuffer() throws(PostgresError) {
-        let received = scratch.withUnsafeMutableBytes { raw in
-            recv(descriptor, raw.baseAddress, raw.count, 0)
+        var received = 0
+        readBuffer.writeWithUnsafeMutableBytes(minimumWritableBytes: Self.receiveChunkBytes) { raw in
+            received = recv(descriptor, raw.baseAddress, raw.count, 0)
+            return received > 0 ? received : 0
         }
         guard received > 0 else { throw PostgresError.connectionClosed }
-        readBuffer.writeBytes(scratch[0..<received])
     }
 
     private func reclaimReadBuffer() {
@@ -111,24 +108,187 @@ final class BlockingPostgresConnection: @unchecked Sendable {
         readBuffer.clear()
     }
 
-    func query(_ sql: String, parameters: [PostgresCell]) throws(PostgresError) -> PostgresQueryResult {
+    // Zero-object fast path: the bound int64 is encoded straight into the Bind (no
+    // [PostgresCell]/String/[UInt8]); decode is the same zero-object read. Fully zero-object.
+    func queryScalarInt64Inline(_ sql: String, value param: Int64) throws(PostgresError) -> Int64 {
+        if sql == lastInlineSQL {
+            do {
+                try sendPreparedScalarBind(statementName: lastInlineName, value: param)
+                return try readScalarInt64()
+            } catch {
+                invalidateInlineCache(for: sql)
+                throw error
+            }
+        }
+        return try queryScalarInt64InlineColdPath(sql, value: param)
+    }
+
+    private func queryScalarInt64InlineColdPath(_ sql: String, value param: Int64) throws(PostgresError) -> Int64 {
         let plan = planStatement(for: sql)
         do {
             writeScratch.clear()
-            buildExtended(plan: plan, sql: sql, parameters: parameters, into: &writeScratch)
+            let name = appendParseIfNeeded(plan, sql: sql, into: &writeScratch)
+            FrontendMessage.appendBindInt64(into: &writeScratch, statementName: name, value: param)
+            FrontendMessage.appendExecute(into: &writeScratch, portalName: "", maxRows: 0)
+            FrontendMessage.appendSync(into: &writeScratch)
             try writeAll(writeScratch)
-            return try collectResult()
+            let value = try readScalarInt64()
+            lastInlineSQL = sql
+            lastInlineName = name
+            return value
         } catch {
-            preparedStatements.removeValue(forKey: sql)
+            invalidateInlineCache(for: sql)
             throw error
         }
     }
 
-    private func collectResult() throws(PostgresError) -> PostgresQueryResult {
-        var accumulator = ResultAccumulator()
-        while true {
-            if try accumulator.absorb(nextMessage()) { return try accumulator.result() }
+    private func invalidateInlineCache(for sql: String) {
+        preparedStatements.removeValue(forKey: sql)
+        lastInlineSQL = ""
+    }
+
+    // Steady-state hot path for a statement already prepared by the cold path: the
+    // Bind/Execute/Sync triple is written with direct big-endian stores into a stack
+    // buffer and sent in one syscall, with no ByteBuffer allocation, copy-on-write
+    // check, or bounds-managed append. The bound integer is rendered as decimal-ASCII
+    // digits inline, so the whole exchange performs zero heap allocation.
+    private func sendPreparedScalarBind(statementName: String, value: Int64) throws(PostgresError) {
+        let negative = value < 0
+        let magnitude = negative ? (~UInt64(bitPattern: value) &+ 1) : UInt64(bitPattern: value)
+        var digitCount = 1
+        var scan = magnitude
+        while scan >= 10 { scan /= 10; digitCount += 1 }
+        let paramLength = digitCount + (negative ? 1 : 0)
+        let failed = sendScalarFrame(statementName: statementName, negative: negative, magnitude: magnitude, digitCount: digitCount, paramLength: paramLength)
+        if failed { throw PostgresError.transportError(reason: "blocking send failed") }
+    }
+
+    private func sendScalarFrame(statementName: String, negative: Bool, magnitude: UInt64, digitCount: Int, paramLength: Int) -> Bool {
+        let nameLength = statementName.utf8.count
+        let bindLength = 4 + 1 + (nameLength + 1) + 2 + 2 + 2 + 4 + paramLength + 2 + 2
+        return withUnsafeTemporaryAllocation(of: UInt8.self, capacity: bindLength + 1 + 9 + 5) { frame in
+            var cursor = ScalarFrameCursor(frame)
+            cursor.putByte(0x42)
+            cursor.putInt32(Int32(bindLength))
+            cursor.putByte(0)
+            for byte in statementName.utf8 { cursor.putByte(byte) }
+            cursor.putByte(0)
+            cursor.putInt16(1)
+            cursor.putInt16(0)
+            cursor.putInt16(1)
+            cursor.putInt32(Int32(paramLength))
+            if negative { cursor.putByte(0x2D) }
+            var divisor: UInt64 = 1
+            for _ in 1..<digitCount { divisor *= 10 }
+            var remainder = magnitude
+            while divisor > 0 {
+                cursor.putByte(0x30 &+ UInt8(remainder / divisor))
+                remainder %= divisor
+                divisor /= 10
+            }
+            cursor.putInt16(1)
+            cursor.putInt16(1)
+            cursor.putByte(0x45)
+            cursor.putInt32(9)
+            cursor.putByte(0)
+            cursor.putInt32(0)
+            cursor.putByte(0x53)
+            cursor.putInt32(4)
+            return sendRawFrame(frame, count: cursor.count)
         }
+    }
+
+    private func sendRawFrame(_ frame: UnsafeMutableBufferPointer<UInt8>, count: Int) -> Bool {
+        guard let base = frame.baseAddress else { return true }
+        var offset = 0
+        while offset < count {
+            let written = send(descriptor, base.advanced(by: offset), count - offset, Int32(MSG_NOSIGNAL))
+            if written <= 0 { return true }
+            offset += written
+        }
+        return false
+    }
+
+    // Pipelined zero-object scalar: every bound value is written as its own
+    // Bind/Execute back-to-back, followed by a single trailing Sync, so the whole
+    // chunk is in flight on the connection at once. Responses arrive in submission
+    // order; each DataRow's int8 field is read in place into the output array. This
+    // amortizes one network round-trip across the whole chunk, matching libpq
+    // pipeline mode, while keeping the per-query allocation count at zero.
+    func queryScalarInt64Pipelined(_ sql: String, values: [Int64]) throws(PostgresError) -> [Int64] {
+        do {
+            writeScratch.clear()
+            let name = pipelineStatementName(for: sql, into: &writeScratch)
+            for value in values {
+                FrontendMessage.appendBindInt64(into: &writeScratch, statementName: name, value: value)
+                FrontendMessage.appendExecute(into: &writeScratch, portalName: "", maxRows: 0)
+            }
+            FrontendMessage.appendSync(into: &writeScratch)
+            try writeAll(writeScratch)
+            return try readScalarInt64Batch(count: values.count)
+        } catch {
+            invalidateInlineCache(for: sql)
+            throw error
+        }
+    }
+
+    private func pipelineStatementName(for sql: String, into buffer: inout ByteBuffer) -> String {
+        if sql == lastInlineSQL { return lastInlineName }
+        let plan = planStatement(for: sql)
+        let name = appendParseIfNeeded(plan, sql: sql, into: &buffer)
+        lastInlineSQL = sql
+        lastInlineName = name
+        return name
+    }
+
+    private func readScalarInt64Batch(count: Int) throws(PostgresError) -> [Int64] {
+        var values: [Int64] = []
+        values.reserveCapacity(count)
+        var sawReadyForQuery = false
+        while !sawReadyForQuery {
+            while readBuffer.readableBytes < 5 { try fillReadBuffer() }
+            let base = readBuffer.readerIndex
+            let tag = readBuffer.getInteger(at: base, as: UInt8.self) ?? 0
+            let length = Int(readBuffer.getInteger(at: base + 1, as: Int32.self) ?? 0)
+            let total = length + 1
+            while readBuffer.readableBytes < total { try fillReadBuffer() }
+            if tag == 0x44 {
+                let fieldCount = readBuffer.getInteger(at: base + 5, as: Int16.self) ?? 0
+                if fieldCount > 0, Int(readBuffer.getInteger(at: base + 7, as: Int32.self) ?? -1) == 8 {
+                    values.append(readBuffer.getInteger(at: base + 11, as: Int64.self) ?? 0)
+                }
+            } else if tag == 0x5A {
+                sawReadyForQuery = true
+            }
+            readBuffer.moveReaderIndex(forwardBy: total)
+            reclaimReadBuffer()
+        }
+        return values
+    }
+
+    private func readScalarInt64() throws(PostgresError) -> Int64 {
+        var value: Int64 = 0
+        while true {
+            while readBuffer.readableBytes < 5 { try fillReadBuffer() }
+            let base = readBuffer.readerIndex
+            let tag = readBuffer.getInteger(at: base, as: UInt8.self) ?? 0
+            let length = Int(readBuffer.getInteger(at: base + 1, as: Int32.self) ?? 0)
+            let total = length + 1
+            while readBuffer.readableBytes < total { try fillReadBuffer() }
+            if tag == 0x44 {
+                let fieldCount = readBuffer.getInteger(at: base + 5, as: Int16.self) ?? 0
+                if fieldCount > 0 {
+                    let fieldLength = Int(readBuffer.getInteger(at: base + 7, as: Int32.self) ?? -1)
+                    if fieldLength == 8 {
+                        value = readBuffer.getInteger(at: base + 11, as: Int64.self) ?? 0
+                    }
+                }
+            }
+            readBuffer.moveReaderIndex(forwardBy: total)
+            reclaimReadBuffer()
+            if tag == 0x5A { break }
+        }
+        return value
     }
 
     private enum Plan {
@@ -137,23 +297,41 @@ final class BlockingPostgresConnection: @unchecked Sendable {
         case parse(name: String)
     }
 
+    private struct ScalarFrameCursor {
+
+        private let buffer: UnsafeMutableBufferPointer<UInt8>
+        private(set) var count: Int = 0
+
+        init(_ buffer: UnsafeMutableBufferPointer<UInt8>) { self.buffer = buffer }
+
+        mutating func putByte(_ value: UInt8) {
+            buffer[count] = value
+            count += 1
+        }
+
+        mutating func putInt16(_ value: Int16) {
+            let bits = UInt16(bitPattern: value)
+            buffer[count] = UInt8(bits >> 8)
+            buffer[count + 1] = UInt8(bits & 0xFF)
+            count += 2
+        }
+
+        mutating func putInt32(_ value: Int32) {
+            let bits = UInt32(bitPattern: value)
+            buffer[count] = UInt8(bits >> 24)
+            buffer[count + 1] = UInt8((bits >> 16) & 0xFF)
+            buffer[count + 2] = UInt8((bits >> 8) & 0xFF)
+            buffer[count + 3] = UInt8(bits & 0xFF)
+            count += 4
+        }
+    }
+
     private func planStatement(for sql: String) -> Plan {
         if let name = preparedStatements[sql] { return .prepared(name: name) }
         statementCounter += 1
         let name = "dxb\(statementCounter)"
         preparedStatements[sql] = name
         return .parse(name: name)
-    }
-
-    // Builds the whole Parse/Bind/Describe/Execute/Sync exchange directly into the
-    // reused write buffer: one allocation reused across queries, no throwaway
-    // per-message buffers and no inter-message copies.
-    private func buildExtended(plan: Plan, sql: String, parameters: [PostgresCell], into buffer: inout ByteBuffer) {
-        let name = appendParseIfNeeded(plan, sql: sql, into: &buffer)
-        FrontendMessage.appendBind(into: &buffer, portalName: "", statementName: name, parameters: parameters)
-        FrontendMessage.appendDescribePortal(into: &buffer, name: "")
-        FrontendMessage.appendExecute(into: &buffer, portalName: "", maxRows: 0)
-        FrontendMessage.appendSync(into: &buffer)
     }
 
     private func appendParseIfNeeded(_ plan: Plan, sql: String, into buffer: inout ByteBuffer) -> String {

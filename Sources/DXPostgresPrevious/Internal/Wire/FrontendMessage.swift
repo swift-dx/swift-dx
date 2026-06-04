@@ -143,37 +143,6 @@ enum FrontendMessage {
         buffer.backpatchLength(at: lengthIndex)
     }
 
-    static func appendBindInt64(into buffer: inout ByteBuffer, statementName: String, value: Int64) {
-        let lengthIndex = buffer.writeMessageLengthPrefix(tag: tagBind)
-        buffer.writeCString("")
-        buffer.writeCString(statementName)
-        buffer.writeInteger(Int16(1))
-        buffer.writeInteger(textFormatCode)
-        buffer.writeInteger(Int16(1))
-        appendInt64TextParameter(value, into: &buffer)
-        buffer.writeInteger(Int16(1))
-        buffer.writeInteger(binaryFormatCode)
-        buffer.backpatchLength(at: lengthIndex)
-    }
-
-    private static func appendInt64TextParameter(_ value: Int64, into buffer: inout ByteBuffer) {
-        let negative = value < 0
-        let magnitude = negative ? (~UInt64(bitPattern: value) &+ 1) : UInt64(bitPattern: value)
-        var count = 1
-        var scan = magnitude
-        while scan >= 10 { scan /= 10; count += 1 }
-        buffer.writeInteger(Int32(count + (negative ? 1 : 0)))
-        if negative { buffer.writeInteger(UInt8(0x2D)) }
-        var divisor: UInt64 = 1
-        for _ in 1..<count { divisor *= 10 }
-        var remainder = magnitude
-        while divisor > 0 {
-            buffer.writeInteger(UInt8(0x30) &+ UInt8(remainder / divisor))
-            remainder %= divisor
-            divisor /= 10
-        }
-    }
-
     private static func writeBindParameters(into buffer: inout ByteBuffer, parameters: [PostgresCell]) {
         buffer.writeInteger(Int16(parameters.count))
         for parameter in parameters {

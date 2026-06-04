@@ -43,6 +43,7 @@ let package = Package(
         .library(name: "DXJetStream", targets: ["DXJetStream"]),
         .library(name: "DXClickHouse", targets: ["DXClickHouse"]),
         .library(name: "DXRedis", targets: ["DXRedis"]),
+        .library(name: "DXPostgresPrevious", targets: ["DXPostgresPrevious"]),
         .library(name: "DXPostgres", targets: ["DXPostgres"]),
         .library(name: "DXJSONSchema", targets: ["DXJSONSchema"]),
         .library(name: "DXSQLite", targets: ["DXSQLite"]),
@@ -89,7 +90,7 @@ let package = Package(
             plugins: integrityPlugins
         ),
         .target(
-            name: "DXPostgres",
+            name: "DXPostgresPrevious",
             dependencies: [
                 "DXCore",
                 .product(name: "NIOCore", package: "swift-nio"),
@@ -106,10 +107,19 @@ let package = Package(
             exclude: ["README.md"],
             plugins: integrityPlugins
         ),
-        .testTarget(
-            name: "DXPostgresTests",
+        .target(
+            name: "DXPostgres",
             dependencies: [
-                "DXPostgres",
+                "DXCore",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "Crypto", package: "swift-crypto"),
+            ],
+            plugins: integrityPlugins
+        ),
+        .testTarget(
+            name: "DXPostgresPreviousTests",
+            dependencies: [
+                "DXPostgresPrevious",
                 "DXCore",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
@@ -118,21 +128,21 @@ let package = Package(
             plugins: integrityPlugins
         ),
         .testTarget(
-            name: "DXPostgresIntegration",
+            name: "DXPostgresPreviousIntegration",
             dependencies: [
-                "DXPostgres",
+                "DXPostgresPrevious",
                 "DXCore",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
                 .product(name: "Logging", package: "swift-log"),
             ],
-            path: "IntegrationTests/DXPostgresIntegration",
+            path: "IntegrationTests/DXPostgresPreviousIntegration",
             plugins: integrityPlugins
         ),
         .testTarget(
-            name: "DXPostgresPublicAPITests",
-            dependencies: ["DXPostgres"],
+            name: "DXPostgresPreviousPublicAPITests",
+            dependencies: ["DXPostgresPrevious"],
             plugins: integrityPlugins
         ),
         .target(
