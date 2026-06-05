@@ -96,6 +96,42 @@ import NIOCore
         }
     }
 
+    @Test func decodesRowDescriptionFieldsWithFormats() throws {
+        let body = bigEndianInt16(2)
+            + describeField(name: "id", typeObjectID: 23, formatCode: 0)
+            + describeField(name: "amount", typeObjectID: 1700, formatCode: 1)
+        let buffer = bufferOf(message(0x54, body))
+        guard case .message(.rowDescription(let fields), _) = try BackendMessageDecoder.decodeOne(from: buffer) else {
+            Issue.record("expected a row description")
+            return
+        }
+        #expect(fields.count == 2)
+        #expect(fields[0].name == "id")
+        #expect(fields[0].dataTypeObjectID == 23)
+        #expect(fields[0].format == .text)
+        #expect(fields[1].name == "amount")
+        #expect(fields[1].dataTypeObjectID == 1700)
+        #expect(fields[1].format == .binary)
+    }
+
+    @Test func rejectsRowDescriptionWithUnknownFormatCode() throws {
+        let body = bigEndianInt16(1) + describeField(name: "id", typeObjectID: 23, formatCode: 2)
+        let buffer = bufferOf(message(0x54, body))
+        #expect(throws: PostgresError.self) {
+            _ = try BackendMessageDecoder.decodeOne(from: buffer)
+        }
+    }
+
+    private func describeField(name: String, typeObjectID: Int32, formatCode: Int16) -> [UInt8] {
+        cString(name)
+            + bigEndianInt32(0)
+            + bigEndianInt16(0)
+            + bigEndianInt32(typeObjectID)
+            + bigEndianInt16(4)
+            + bigEndianInt32(-1)
+            + bigEndianInt16(formatCode)
+    }
+
     private func bufferOf(_ bytes: [UInt8]) -> ByteBuffer {
         var buffer = ByteBufferAllocator().buffer(capacity: bytes.count)
         buffer.writeBytes(bytes)
