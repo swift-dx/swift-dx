@@ -33,6 +33,7 @@ final class BlockingPostgresConnection: @unchecked Sendable {
     private static let initialReadBufferBytes = 16 * 1024
     private static let initialWriteScratchBytes = 512
     private static let receiveChunkBytes = 64 * 1024
+    private static let maxCachedStatements = 512
 
     private let descriptor: Int32
     private let closeState = Atomic<Bool>(false)
@@ -287,8 +288,10 @@ final class BlockingPostgresConnection: @unchecked Sendable {
             FrontendMessage.appendSync(into: &writeScratch)
             try writeAll(writeScratch)
             let value = try readScalarInt64()
-            lastInlineSQL = sql
-            lastInlineName = name
+            if !name.isEmpty {
+                lastInlineSQL = sql
+                lastInlineName = name
+            }
             return value
         } catch {
             invalidateInlineCache(for: sql)
@@ -390,8 +393,10 @@ final class BlockingPostgresConnection: @unchecked Sendable {
         if sql == lastInlineSQL { return lastInlineName }
         let plan = planStatement(for: sql)
         let name = appendParseIfNeeded(plan, sql: sql, into: &buffer)
-        lastInlineSQL = sql
-        lastInlineName = name
+        if !name.isEmpty {
+            lastInlineSQL = sql
+            lastInlineName = name
+        }
         return name
     }
 
@@ -493,11 +498,14 @@ final class BlockingPostgresConnection: @unchecked Sendable {
 
     private func planStatement(for sql: String) -> Plan {
         if let name = preparedStatements[sql] { return .prepared(name: name) }
+        guard preparedStatements.count < Self.maxCachedStatements else { return .parse(name: "") }
         statementCounter += 1
         let name = "dxb\(statementCounter)"
         preparedStatements[sql] = name
         return .parse(name: name)
     }
+
+    var cachedStatementCount: Int { preparedStatements.count }
 
     private func appendParseIfNeeded(_ plan: Plan, sql: String, into buffer: inout ByteBuffer) -> String {
         switch plan {
