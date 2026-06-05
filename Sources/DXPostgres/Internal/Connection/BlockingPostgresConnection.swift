@@ -34,6 +34,7 @@ final class BlockingPostgresConnection: @unchecked Sendable {
     private static let initialWriteScratchBytes = 512
     private static let receiveChunkBytes = 64 * 1024
     private static let maxCachedStatements = 512
+    private static let maxBindParameters = 65535
 
     private let descriptor: Int32
     private let closeState = Atomic<Bool>(false)
@@ -120,6 +121,9 @@ final class BlockingPostgresConnection: @unchecked Sendable {
     // back in text format streamed through the borrowed row view. The statement is
     // parsed once and cached.
     func query(_ sql: String, bindings: [PostgresCell], onRow: (PostgresRowView) throws(PostgresError) -> Void) throws(PostgresError) -> [PostgresColumn] {
+        guard bindings.count <= Self.maxBindParameters else {
+            throw PostgresError.parameterCountMismatch(expected: Self.maxBindParameters, provided: bindings.count)
+        }
         let plan = planStatement(for: sql)
         do {
             writeScratch.clear()

@@ -167,12 +167,25 @@ enum FrontendMessage {
 
     private static func appendInt64TextParameter(_ value: Int64, into buffer: inout ByteBuffer) {
         let negative = value < 0
-        let magnitude = negative ? (~UInt64(bitPattern: value) &+ 1) : UInt64(bitPattern: value)
+        let magnitude = unsignedMagnitude(of: value)
+        let digits = decimalDigitCount(of: magnitude)
+        buffer.writeInteger(Int32(negative ? digits + 1 : digits))
+        if negative { buffer.writeInteger(UInt8(0x2D)) }
+        writeDecimalDigits(magnitude, count: digits, into: &buffer)
+    }
+
+    private static func unsignedMagnitude(of value: Int64) -> UInt64 {
+        value < 0 ? (~UInt64(bitPattern: value) &+ 1) : UInt64(bitPattern: value)
+    }
+
+    private static func decimalDigitCount(of magnitude: UInt64) -> Int {
         var count = 1
         var scan = magnitude
         while scan >= 10 { scan /= 10; count += 1 }
-        buffer.writeInteger(Int32(count + (negative ? 1 : 0)))
-        if negative { buffer.writeInteger(UInt8(0x2D)) }
+        return count
+    }
+
+    private static func writeDecimalDigits(_ magnitude: UInt64, count: Int, into buffer: inout ByteBuffer) {
         var divisor: UInt64 = 1
         for _ in 1..<count { divisor *= 10 }
         var remainder = magnitude
@@ -184,7 +197,7 @@ enum FrontendMessage {
     }
 
     private static func writeBindParameters(into buffer: inout ByteBuffer, parameters: [PostgresCell]) {
-        buffer.writeInteger(Int16(parameters.count))
+        buffer.writeInteger(Int16(bitPattern: UInt16(parameters.count)))
         for parameter in parameters {
             writeBindParameter(into: &buffer, parameter: parameter)
         }
