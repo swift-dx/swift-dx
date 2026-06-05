@@ -35,4 +35,19 @@ import Glibc
         close(reused[0])
         close(reused[1])
     }
+
+    @Test func droppedConnectionClosesItsDescriptor() {
+        var descriptors: [Int32] = [0, 0]
+        #expect(socketpair(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0, &descriptors) == 0)
+        defer { close(descriptors[1]) }
+
+        openAndDrop(descriptors[0])
+
+        #expect(fcntl(descriptors[0], F_GETFD) == -1)
+    }
+
+    private func openAndDrop(_ descriptor: Int32) {
+        let connection = BlockingPostgresConnection(descriptor: descriptor)
+        _ = connection.cachedStatementCount
+    }
 }

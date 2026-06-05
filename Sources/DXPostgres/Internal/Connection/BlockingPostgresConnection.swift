@@ -71,6 +71,10 @@ final class BlockingPostgresConnection: @unchecked Sendable {
         _ = Glibc.close(descriptor)
     }
 
+    deinit {
+        close()
+    }
+
     // Sends one fully-built wire buffer straight from its storage (no [UInt8] copy).
     func writeAll(_ buffer: ByteBuffer) throws(PostgresError) {
         var failed = false
