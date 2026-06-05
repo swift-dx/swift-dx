@@ -36,6 +36,29 @@ import Glibc
         #expect(result.rows[0] == [.bytes(Array("ab".utf8)), .sqlNull])
     }
 
+    @Test func ownedExecuteCollectsEveryRowInOrderWithMixedNulls() throws {
+        var descriptors: [Int32] = [0, 0]
+        #expect(socketpair(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0, &descriptors) == 0)
+        defer { close(descriptors[1]) }
+
+        let response = rowDescription([("id", 23), ("note", 25)])
+            + dataRow([.value(Array("1".utf8)), .value(Array("first".utf8))])
+            + dataRow([.value(Array("2".utf8)), .null])
+            + dataRow([.value(Array("3".utf8)), .value(Array("".utf8))])
+            + commandComplete("SELECT 3")
+            + readyForQuery
+        response.withUnsafeBytes { _ = write(descriptors[1], $0.baseAddress, $0.count) }
+
+        let connection = BlockingPostgresConnection(descriptor: descriptors[0])
+        defer { connection.close() }
+
+        let result = try connection.execute("SELECT id, note FROM things")
+        #expect(result.rows.count == 3)
+        #expect(result.rows[0] == [.bytes(Array("1".utf8)), .bytes(Array("first".utf8))])
+        #expect(result.rows[1] == [.bytes(Array("2".utf8)), .sqlNull])
+        #expect(result.rows[2] == [.bytes(Array("3".utf8)), .bytes([])])
+    }
+
     private enum Field {
 
         case value([UInt8])
