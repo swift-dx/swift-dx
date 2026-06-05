@@ -49,21 +49,21 @@ public final class PostgresListener: @unchecked Sendable {
 
 extension Postgres {
 
-    /// Opens a dedicated connection, subscribes it to `channels` with `LISTEN`, and
-    /// returns a listener whose ``PostgresListener/notifications`` stream yields each
-    /// notification. To watch a table, install a trigger that calls `pg_notify` on
-    /// the channel (optionally with a `WHEN` filter) and listen on that channel.
-    public static func listen(host: String, port: Int, username: String, password: String, database: String, applicationName: String, channels: [String]) throws(PostgresError) -> PostgresListener {
+    /// Subscribes to `channels` and returns a listener whose
+    /// ``PostgresListener/notifications`` stream yields each notification the
+    /// server publishes on them. To follow a table's changes, use
+    /// ``watchTable(_:table:channel:)`` instead, which installs the publishing
+    /// trigger and subscribes for you.
+    public static func subscribe(host: String, port: Int, username: String, password: String, database: String, applicationName: String, channels: [String]) throws(PostgresError) -> PostgresListener {
         let connection = try BlockingPostgresConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName)
         return try PostgresListener(connection: connection, channels: channels)
     }
 
-    /// Subscribes to `channels` using the same connection settings as a pooled
-    /// client, so a listener and a pool can share one `PostgresConfiguration`. A
-    /// listener still opens its own dedicated connection, since it parks in a
-    /// receive loop and cannot be borrowed from the pool.
-    public static func listen(_ configuration: PostgresConfiguration, channels: [String]) throws(PostgresError) -> PostgresListener {
-        try listen(host: configuration.host, port: configuration.port, username: configuration.username, password: configuration.password, database: configuration.database, applicationName: configuration.applicationName, channels: channels)
+    /// Subscribes to `channels` using the same ``PostgresConfiguration`` as a
+    /// pooled client, so a subscription and a pool share one configuration. The
+    /// subscription manages its own connection.
+    public static func subscribe(_ configuration: PostgresConfiguration, channels: [String]) throws(PostgresError) -> PostgresListener {
+        try subscribe(host: configuration.host, port: configuration.port, username: configuration.username, password: configuration.password, database: configuration.database, applicationName: configuration.applicationName, channels: channels)
     }
 
     /// Watches `table` using a shared ``PostgresConfiguration``.

@@ -166,7 +166,7 @@ private func runSelectDemo() async throws {
 }
 
 private func runNotifyDemo() async throws {
-    let listener = try Postgres.listen(host: host, port: port, username: username, password: password, database: database, applicationName: "dxlisten", channels: ["dx_demo"])
+    let listener = try Postgres.subscribe(host: host, port: port, username: username, password: password, database: database, applicationName: "dxlisten", channels: ["dx_demo"])
     // Fire three notifications from a separate connection (as a trigger's pg_notify would).
     let notifier = try PostgresDirectConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: "dxnotify")
     _ = try notifier.execute("NOTIFY dx_demo, '{\"op\":\"INSERT\",\"id\":1}'")

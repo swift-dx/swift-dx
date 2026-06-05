@@ -151,28 +151,27 @@ func activeUserCount() async throws -> PostgresResult {
 `Postgres.current()` returns the bound client, or throws
 `PostgresError.noCurrentClient` when nothing is bound — no null, no trap.
 
-## LISTEN / NOTIFY and table watching
+## Subscriptions
 
 ```swift
+// Subscribe to raw channels (your own NOTIFY / pg_notify) — reuse the same
+// configuration you built for the pool:
+let subscription = try Postgres.subscribe(configuration, channels: ["cache_invalidation"])
+for try await note in subscription.notifications {
+    handle(note.payload)
+}
+
 // Watch a table; the WHEN filter runs in the server, so only matching changes
-// reach the client, each as JSON: {"op":"UPDATE","row":{…}}.
-let watch = try Postgres.watchTable(
-    host: "127.0.0.1", port: 5432, username: "app", password: "", database: "app",
-    applicationName: "watcher", table: "orders", channel: "order_changes",
-    where: "NEW.status = 'paid'"
-)
+// reach you, each as JSON: {"op":"UPDATE","row":{…}}.
+let watch = try Postgres.watchTable(configuration, table: "orders", channel: "order_changes", where: "NEW.status = 'paid'")
 for try await change in watch.notifications {
     handle(change.payload)
 }
-
-// Or subscribe to raw channels (your own NOTIFY / pg_notify):
-let listener = try Postgres.listen(host: …, channels: ["cache_invalidation"])
-for try await note in listener.notifications { … }
 ```
 
-A listener owns a dedicated connection parked in a blocking receive loop on its
-own thread; each notification is yielded to the async stream. Ending the stream
-closes the connection.
+Each notification the subscription yields is delivered to the async stream;
+ending the stream tears the subscription down. The subscription manages its own
+connection.
 
 ## Performance
 
