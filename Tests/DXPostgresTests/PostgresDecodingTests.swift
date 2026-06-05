@@ -21,6 +21,11 @@ import Testing
         let active: Bool
     }
 
+    private struct Flag: Decodable, Equatable {
+
+        let active: Bool
+    }
+
     private func column(_ name: String, _ oid: UInt32) -> PostgresColumn {
         PostgresColumn(name: name, dataTypeObjectID: oid, format: .text)
     }
@@ -47,5 +52,20 @@ import Testing
     @Test func columnIndexLookup() throws {
         let result = PostgresResult(columns: [column("id", 23), column("email", 25)], rows: [])
         #expect(try result.columnIndex(named: "email") == 1)
+    }
+
+    @Test func decodesCanonicalBoolValues() throws {
+        let result = PostgresResult(
+            columns: [column("active", 16)],
+            rows: [[.bytes(Array("t".utf8))], [.bytes(Array("f".utf8))]]
+        )
+        #expect(try result.decode(as: Flag.self) == [Flag(active: true), Flag(active: false)])
+    }
+
+    @Test func nonCanonicalBoolValueThrowsRatherThanCoercing() throws {
+        let result = PostgresResult(columns: [column("active", 16)], rows: [[.bytes(Array("true".utf8))]])
+        #expect(throws: PostgresError.self) {
+            try result.decode(as: Flag.self)
+        }
     }
 }

@@ -46,7 +46,7 @@ struct PostgresRowKeyedContainer<Key: CodingKey>: KeyedDecodingContainerProtocol
         return false
     }
 
-    func decode(_ type: Bool.Type, forKey key: Key) throws -> Bool { try text(key) == "t" }
+    func decode(_ type: Bool.Type, forKey key: Key) throws -> Bool { try boolean(key) }
     func decode(_ type: String.Type, forKey key: Key) throws -> String { try text(key) }
     func decode(_ type: Double.Type, forKey key: Key) throws -> Double { try floating(key) }
     func decode(_ type: Float.Type, forKey key: Key) throws -> Float { Float(try floating(key)) }
@@ -100,6 +100,14 @@ struct PostgresRowKeyedContainer<Key: CodingKey>: KeyedDecodingContainerProtocol
             throw DecodingError.typeMismatch(Value.self, .init(codingPath: codingPath + [key], debugDescription: "column \(key.stringValue) is not a \(Value.self)"))
         }
         return value
+    }
+
+    private func boolean(_ key: Key) throws -> Bool {
+        switch try text(key) {
+        case "t": return true
+        case "f": return false
+        case let other: throw DecodingError.typeMismatch(Bool.self, .init(codingPath: codingPath + [key], debugDescription: "column \(key.stringValue) is not a boolean: \(other)"))
+        }
     }
 
     private func floating(_ key: Key) throws -> Double {
