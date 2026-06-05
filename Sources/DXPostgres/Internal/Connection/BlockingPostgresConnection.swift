@@ -16,6 +16,7 @@ import Darwin
 #endif
 import DXCore
 import NIOCore
+import Synchronization
 
 // One PostgreSQL connection driven by synchronous, blocking socket I/O on a
 // single owning thread, reusing the same wire codecs as the event-loop path
@@ -34,6 +35,7 @@ final class BlockingPostgresConnection: @unchecked Sendable {
     private static let receiveChunkBytes = 64 * 1024
 
     private let descriptor: Int32
+    private let closeState = Atomic<Bool>(false)
     private let allocator = ByteBufferAllocator()
     private var readBuffer: ByteBuffer
     private var writeScratch: ByteBuffer
@@ -61,6 +63,8 @@ final class BlockingPostgresConnection: @unchecked Sendable {
     }
 
     func close() {
+        let (exchanged, _) = closeState.compareExchange(expected: false, desired: true, ordering: .acquiringAndReleasing)
+        guard exchanged else { return }
         _ = shutdown(descriptor, Int32(SHUT_RDWR))
         _ = Glibc.close(descriptor)
     }
