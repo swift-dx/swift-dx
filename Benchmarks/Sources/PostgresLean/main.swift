@@ -247,10 +247,21 @@ private func runServiceDemo() async throws {
     print("[SERVICE DEMO] graceful shutdown complete; pool torn down")
 }
 
+private func residentBytes() -> Int {
+    guard let status = try? String(contentsOfFile: "/proc/self/status", encoding: .utf8) else { return 0 }
+    for line in status.split(separator: "\n") where line.hasPrefix("VmRSS:") {
+        if let kilobytes = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).compactMap({ Int($0) }).first {
+            return kilobytes * 1024
+        }
+    }
+    return 0
+}
+
 private func runSoak() async throws {
     let seconds = envInt("POSTGRES_BENCH_SOAK_SECONDS", 20)
     let pool = try PostgresLeasePool(host: host, port: port, username: username, password: password, database: database, applicationName: "dxsoak", size: concurrency)
     defer { pool.shutdown() }
+    let rssStart = residentBytes()
     let start = ContinuousClock.now
     let deadline = start.advanced(by: .seconds(seconds))
     let total = try await withThrowingTaskGroup(of: Int.self, returning: Int.self) { group in
@@ -273,7 +284,10 @@ private func runSoak() async throws {
         return collected
     }
     let elapsed = elapsedSeconds(start)
+    let rssEnd = residentBytes()
+    let rssDeltaMB = Double(rssEnd - rssStart) / 1_048_576
     print("[SOAK] \(total) queries over \(String(format: "%.1f", elapsed))s = \(rate(total, elapsed))/s, pool=\(concurrency) clients=\(clients) — completed cleanly, no crash")
+    print("[SOAK] RSS start=\(rssStart / 1_048_576)MB end=\(rssEnd / 1_048_576)MB delta=\(String(format: "%+.1f", rssDeltaMB))MB over \(total) queries (flat delta => no leak)")
 }
 
 print("[POSTGRES PERF SWIFT] lean config host=\(host) port=\(port) database=\(database) modes=\(modes.joined(separator: ","))")
