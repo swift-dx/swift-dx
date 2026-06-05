@@ -100,6 +100,22 @@ import Foundation
         #expect(try result.decode(as: Flag.self).isEmpty)
     }
 
+    @Test func missingColumnForAFieldThrowsRatherThanCrashing() {
+        let result = PostgresResult(
+            columns: [column("id", 23), column("email", 25)],
+            rows: [[.bytes(Array("7".utf8)), .bytes(Array("a@b.com".utf8))]]
+        )
+        #expect(throws: PostgresError.self) { try result.decode(as: Account.self) }
+    }
+
+    @Test func extraColumnsBeyondTheTargetAreIgnored() throws {
+        let result = PostgresResult(
+            columns: [column("active", 16), column("note", 25)],
+            rows: [[.bytes(Array("t".utf8)), .bytes(Array("ignored".utf8))]]
+        )
+        #expect(try result.decode(as: Flag.self) == [Flag(active: true)])
+    }
+
     @Test func unsupportedFieldTypesThrowRatherThanCrashing() throws {
         let timestamp = PostgresResult(columns: [column("id", 23), column("created", 1114)], rows: [[.bytes(Array("1".utf8)), .bytes(Array("2026-01-01".utf8))]])
         #expect(throws: PostgresError.self) { try timestamp.decode(as: WithTimestamp.self) }
