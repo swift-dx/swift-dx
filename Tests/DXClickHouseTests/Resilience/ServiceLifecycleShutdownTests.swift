@@ -28,8 +28,8 @@ import Testing
 struct ClickHouseServiceShutdownTests {
 
     @Test("ClickHouseConfiguration default shutdownGracePeriod is 30 seconds")
-    func defaultGracePeriodIs30Seconds() {
-        let configuration = ClickHouseConfiguration(
+    func defaultGracePeriodIs30Seconds() throws {
+        let configuration = try ClickHouseConfiguration(
             endpoints: [ClickHouseEndpoint(host: "h", port: 9000)]
         )
         #expect(configuration.shutdownGracePeriod == .seconds(30))
@@ -52,10 +52,12 @@ struct ClickHouseServiceShutdownTests {
     func serviceRunReturnsOnShutdown() async throws {
         let host = ProcessInfo.processInfo.environment["CH_INTEGRATION_HOST"] ?? "localhost"
         let port = Int(ProcessInfo.processInfo.environment["CH_INTEGRATION_PORT"] ?? "9000") ?? 9000
+        let password = ProcessInfo.processInfo.environment["CH_INTEGRATION_PASSWORD"] ?? ""
 
         let configuration = ClickHouseConfiguration(
             host: host,
             port: port,
+            password: password,
             shutdownGracePeriod: .seconds(2)
         )
         let service = try await ClickHouseService(configuration: configuration)
@@ -86,10 +88,12 @@ struct ClickHouseServiceShutdownTests {
     func serviceDrainsInFlightShortQueries() async throws {
         let host = ProcessInfo.processInfo.environment["CH_INTEGRATION_HOST"] ?? "localhost"
         let port = Int(ProcessInfo.processInfo.environment["CH_INTEGRATION_PORT"] ?? "9000") ?? 9000
+        let password = ProcessInfo.processInfo.environment["CH_INTEGRATION_PASSWORD"] ?? ""
 
         let configuration = ClickHouseConfiguration(
             host: host,
             port: port,
+            password: password,
             shutdownGracePeriod: .seconds(5)
         )
         let service = try await ClickHouseService(configuration: configuration)

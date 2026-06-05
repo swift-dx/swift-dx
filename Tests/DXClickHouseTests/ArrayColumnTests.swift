@@ -70,6 +70,50 @@ struct ClickHouseArrayColumnTests {
         #expect(decoded == rows)
     }
 
+    @Test("decode rejects a malformed Array offset above Int.max instead of trapping")
+    func rejectsOversizedArrayOffset() {
+        // Array(UInt8), one row, whose single cumulative element-count
+        // offset has the high bit set (> Int.max). A corrupt or truncated
+        // block must surface a typed error rather than trap when the
+        // server-controlled offset is converted to Int.
+        let body = Self.uint64LE(0x8000_0000_0000_0000)
+        let block = ClickHouseBlock(
+            rowCount: 1, columnCount: 1,
+            columnNames: ["values"],
+            columnTypes: ["Array(UInt8)"],
+            bodyStart: 0, bodyLength: body.count
+        )
+        #expect(Self.parseStage(block: block, body: body) == "decoder.array")
+    }
+
+    @Test("decode rejects a malformed intermediate Array offset above Int.max instead of trapping")
+    func rejectsOversizedIntermediateOffset() {
+        // Two rows. The final cumulative offset (5) passes the bytes-remaining
+        // bound, but the intermediate offset has the high bit set (> Int.max)
+        // and reaches the per-row grouping. Converting it to Int unchecked
+        // would trap; the decode must surface a typed error instead.
+        let body = Self.uint64LE(0x8000_0000_0000_0000) + Self.uint64LE(5) + [0, 0, 0, 0, 0]
+        let block = ClickHouseBlock(
+            rowCount: 2, columnCount: 1,
+            columnNames: ["values"],
+            columnTypes: ["Array(UInt8)"],
+            bodyStart: 0, bodyLength: body.count
+        )
+        #expect(Self.parseStage(block: block, body: body) == "decoder.array")
+    }
+
+    private static func parseStage(block: ClickHouseBlock, body: [UInt8]) -> String {
+        do {
+            _ = try body.withUnsafeBytes { raw in
+                try ClickHouseCodableDecoder.parseTypedColumns(block: block, body: raw)
+            }
+            return "none"
+        } catch {
+            if let typed = error as? ClickHouseError, case .protocolError(let stage, _) = typed { return stage }
+            return "other: \(error)"
+        }
+    }
+
     private static func roundTrip(rows: [Row], bodyLength: Int) throws -> [Row] {
         let columns = try ClickHouseRowEncoder().encode(rows)
         let packet = try ClickHouseBlockWriter.encodeDataPacket(

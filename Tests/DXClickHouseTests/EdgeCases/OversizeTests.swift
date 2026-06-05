@@ -26,12 +26,17 @@ struct ClickHouseOversizeTests {
     private static var host: String {
         ProcessInfo.processInfo.environment["CH_INTEGRATION_HOST"] ?? "localhost"
     }
+
+    private static var password: String {
+        ProcessInfo.processInfo.environment["CH_INTEGRATION_PASSWORD"] ?? ""
+    }
+
     private static var port: Int {
         Int(ProcessInfo.processInfo.environment["CH_INTEGRATION_PORT"] ?? "9000") ?? 9000
     }
 
     private static func makeClient() async throws -> ClickHouseClient {
-        try await ClickHouseClient(host: host, port: port)
+        try await ClickHouseClient(host: host, port: port, password: password)
     }
 
     private static func uniqueTableName(_ prefix: String) -> String {

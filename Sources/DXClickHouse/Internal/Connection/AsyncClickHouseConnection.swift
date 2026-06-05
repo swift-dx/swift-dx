@@ -84,7 +84,7 @@ public final actor AsyncClickHouseConnection {
 
     public func sendQuery(_ sql: String) async throws(ClickHouseError) {
         let transport = self.transport
-        let _: Void = try await Self.bridgeThrowing { (continuation: CheckedContinuation<Void, Error>) in
+        let _: Void = try await Self.bridgeThrowing(transport: transport) { (continuation: CheckedContinuation<Void, Error>) in
             worker.async {
                 do {
                     try transport.connection.sendQuery(sql)
@@ -106,7 +106,7 @@ public final actor AsyncClickHouseConnection {
         parameters: ClickHouseQueryParameters = .empty
     ) async throws(ClickHouseError) {
         let transport = self.transport
-        let _: Void = try await Self.bridgeThrowing { (continuation: CheckedContinuation<Void, Error>) in
+        let _: Void = try await Self.bridgeThrowing(transport: transport) { (continuation: CheckedContinuation<Void, Error>) in
             worker.async {
                 do {
                     try transport.connection.sendQuery(
@@ -123,14 +123,31 @@ public final actor AsyncClickHouseConnection {
         }
     }
 
-    // Round-trip Ping → Pong. Pool preflight uses this to validate a
-    // recycled connection before handing it back to a caller.
+    // Round-trip Ping → Pong with the connection's reconnect policy
+    // applied to a transient send failure.
     public func ping() async throws(ClickHouseError) {
         let transport = self.transport
-        let _: Void = try await Self.bridgeThrowing { (continuation: CheckedContinuation<Void, Error>) in
+        let _: Void = try await Self.bridgeThrowing(transport: transport) { (continuation: CheckedContinuation<Void, Error>) in
             worker.async {
                 do {
                     try transport.connection.ping()
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    // Single-shot Ping → Pong with NO reconnect, used by pool preflight so
+    // a dead idle connection fails fast and is discarded rather than
+    // looping inside reconnect under the always-retry policy.
+    public func pingOnce() async throws(ClickHouseError) {
+        let transport = self.transport
+        let _: Void = try await Self.bridgeThrowing(transport: transport) { (continuation: CheckedContinuation<Void, Error>) in
+            worker.async {
+                do {
+                    try transport.connection.pingOnce()
                     continuation.resume()
                 } catch {
                     continuation.resume(throwing: error)
@@ -145,7 +162,7 @@ public final actor AsyncClickHouseConnection {
     // — one hop, no per-block coordination.
     public func drainBlocks() async throws(ClickHouseError) -> Int {
         let transport = self.transport
-        return try await Self.bridgeThrowing { (continuation: CheckedContinuation<Int, Error>) in
+        return try await Self.bridgeThrowing(transport: transport) { (continuation: CheckedContinuation<Int, Error>) in
             worker.async {
                 do {
                     let rows = try transport.connection.receiveBlocksDrain { _, _, _ in }
@@ -167,7 +184,7 @@ public final actor AsyncClickHouseConnection {
         onProfileEvents: @escaping @Sendable (ClickHouseProfileEvents) -> Void = { _ in }
     ) async throws(ClickHouseError) -> Int {
         let transport = self.transport
-        return try await Self.bridgeThrowing { (continuation: CheckedContinuation<Int, Error>) in
+        return try await Self.bridgeThrowing(transport: transport) { (continuation: CheckedContinuation<Int, Error>) in
             worker.async {
                 do {
                     let callbacks = ClickHouseConnection.ReceiveCallbacks(
@@ -187,7 +204,7 @@ public final actor AsyncClickHouseConnection {
     // Scalar UInt64 round-trip. One continuation hop per call.
     public func receiveScalarUInt64() async throws(ClickHouseError) -> UInt64 {
         let transport = self.transport
-        return try await Self.bridgeThrowing { (continuation: CheckedContinuation<UInt64, Error>) in
+        return try await Self.bridgeThrowing(transport: transport) { (continuation: CheckedContinuation<UInt64, Error>) in
             worker.async {
                 do {
                     let value = try transport.connection.receiveScalarUInt64()
@@ -206,7 +223,7 @@ public final actor AsyncClickHouseConnection {
     // shape used by `select_full_scan_proj_view`.
     public func extractStringsDrain() async throws(ClickHouseError) -> (rows: Int, bytes: Int) {
         let transport = self.transport
-        return try await Self.bridgeThrowing { (continuation: CheckedContinuation<(Int, Int), Error>) in
+        return try await Self.bridgeThrowing(transport: transport) { (continuation: CheckedContinuation<(Int, Int), Error>) in
             worker.async {
                 do {
                     var bytes = 0
@@ -223,6 +240,49 @@ public final actor AsyncClickHouseConnection {
         }
     }
 
+    // Typed collecting read on a leased pooled connection: sends the query,
+    // drains every result block, and decodes each row through Codable in a
+    // single worker hop, so the lease holds the connection for the query's
+    // whole lifetime. This gives the pooled concurrency path the same typed
+    // Codable surface the single-connection client has, instead of forcing
+    // pooled callers to drop down to the raw drain/extract wire methods.
+    public func selectAll<T: Decodable & Sendable>(
+        _ sql: String,
+        as type: T.Type,
+        settings: ClickHouseQuerySettings = .empty,
+        parameters: ClickHouseQueryParameters = .empty
+    ) async throws(ClickHouseError) -> [T] {
+        let transport = self.transport
+        return try await Self.bridgeThrowing(transport: transport) { (continuation: CheckedContinuation<[T], Error>) in
+            worker.async {
+                do {
+                    try transport.connection.sendQuery(sql, queryID: "", settings: settings, parameters: parameters)
+                    var rows: [T] = []
+                    var outcome = StreamDecodeOutcome.ok
+                    _ = try transport.connection.receiveBlocks { block, body in
+                        if block.rowCount == 0 { return }
+                        if case .failed = outcome { return }
+                        do {
+                            let typed = try ClickHouseCodableDecoder.parseTypedColumns(block: block, body: body)
+                            rows.append(contentsOf: try ClickHouseCodableDecoder.decodeRows(type: T.self, columns: typed, rowCount: block.rowCount))
+                        } catch let error as ClickHouseError {
+                            outcome = .failed(error)
+                        } catch {
+                            outcome = .failed(.protocolError(stage: "pool.selectAll", message: "\(error)"))
+                        }
+                    }
+                    if case .failed(let error) = outcome {
+                        continuation.resume(throwing: error)
+                        return
+                    }
+                    continuation.resume(returning: rows)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     // Bridges the untyped-throws `withCheckedThrowingContinuation` API
     // into a typed `throws(ClickHouseError)` surface. Every continuation
     // resume in this file forwards a `ClickHouseError` thrown by the
@@ -231,10 +291,20 @@ public final actor AsyncClickHouseConnection {
     // wraps it as a typed protocolError so the SemVer contract holds.
     @inline(__always)
     private static func bridgeThrowing<T: Sendable>(
+        transport: TransportBox,
         _ body: @Sendable (CheckedContinuation<T, Error>) -> Void
     ) async throws(ClickHouseError) -> T {
         do {
-            return try await withCheckedThrowingContinuation(body)
+            // The worker runs the body's blocking recv/send on a serial
+            // queue, so a cancelled caller would otherwise stay parked until
+            // the server eventually replies — and never if it has stalled.
+            // Shutting the socket down from the cancellation handler unblocks
+            // the parked syscall so this await fails fast instead of hanging.
+            return try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation(body)
+            } onCancel: {
+                transport.connection.shutdownSocketForTimeout()
+            }
         } catch let typed as ClickHouseError {
             throw typed
         } catch {
@@ -257,6 +327,16 @@ public final actor AsyncClickHouseConnection {
         let worker = self.worker
         let transport = self.transport
         return AsyncThrowingStream { continuation in
+            // A cancelled consumer would otherwise leave the worker parked in
+            // a blocking recv (a stalled server never sends EndOfStream),
+            // hanging every later operation behind the serial worker queue —
+            // including close(). Shutting the socket down from the
+            // cancellation thread unblocks that recv so the worker fails fast.
+            continuation.onTermination = { reason in
+                if case .cancelled = reason {
+                    transport.connection.shutdownSocketForTimeout()
+                }
+            }
             worker.async {
                 do {
                     _ = try transport.connection.receiveBlocks { _, body in
@@ -280,8 +360,23 @@ public final actor AsyncClickHouseConnection {
         }
     }
 
+    deinit {
+        // A connection dropped without an explicit close() — including a pooled
+        // connection the pool discards — must not leak its worker thread if that
+        // worker is spinning in the unbounded reconnect backoff against a gone
+        // server. requestShutdown only stores an atomic (safe from a nonisolated
+        // deinit, does not touch the socket), which the reconnect loop re-checks
+        // each iteration and breaks on.
+        transport.connection.requestShutdown()
+    }
+
     public func close() async {
         let transport = self.transport
+        // Signal shutdown BEFORE hopping onto the worker: if the worker is
+        // spinning in the reconnect backoff loop, a requestShutdown enqueued
+        // behind it would never run and close() would hang. Storing the atomic
+        // here breaks that loop so the queued socket teardown can proceed.
+        transport.connection.requestShutdown()
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             worker.async {
                 transport.connection.close()

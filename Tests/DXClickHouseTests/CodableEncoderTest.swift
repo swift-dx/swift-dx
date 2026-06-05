@@ -59,7 +59,7 @@ struct ClickHouseRowEncoderTest {
         default: Issue.record("expected uint64 column")
         }
         switch columns[1].column {
-        case .string(let values): #expect(values == ["alpha", "beta"])
+        case .stringValues(let values): #expect(values == ["alpha", "beta"])
         default: Issue.record("expected string column")
         }
         switch columns[2].column {
@@ -79,7 +79,7 @@ struct ClickHouseRowEncoderTest {
         switch columns[1].column {
         case .nullableString(let values):
             switch values[0] {
-            case .present(let v): #expect(v == "first")
+            case .present(let v): #expect(String(decoding: v, as: UTF8.self) == "first")
             case .absent: Issue.record("row 0 should be present")
             }
             #expect(values[1].isAbsent)

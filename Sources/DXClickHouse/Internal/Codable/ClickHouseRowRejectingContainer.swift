@@ -66,9 +66,10 @@ struct ClickHouseRowRejectingKeyedContainer<Key: CodingKey>: KeyedEncodingContai
     mutating func superEncoder(forKey key: Key) -> Encoder { ClickHouseRowRejectingEncoder(codingPath: codingPath + [key]) }
 
     private func rejection() -> ClickHouseError {
-        .protocolError(
+        let path = codingPath.map { $0.stringValue }.joined(separator: ".")
+        return .protocolError(
             stage: "encoder.nested",
-            message: "Nested containers are not supported. Each row must be a flat keyed struct of supported scalars."
+            message: "field '\(path)' encodes as a nested struct, which the insert encoder does not map to a column. Insert a composite column (Tuple, Nested) as an explicit ClickHouseTuple or ClickHouseArrayOfTuple value; every other field of the row must be a flat scalar, array, or map."
         )
     }
 }

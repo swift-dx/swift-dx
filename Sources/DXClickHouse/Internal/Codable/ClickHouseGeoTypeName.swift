@@ -102,49 +102,62 @@ enum ClickHouseGeoTypeName {
     }
 
     private static func splitTopLevel(_ arguments: String) -> [String] {
-        var pieces: [String] = []
-        var current: [UInt8] = []
-        var depth = 0
-        for byte in arguments.utf8 {
-            appendByte(byte, into: &current, pieces: &pieces, depth: &depth)
-        }
-        pieces.append(trimmed(current))
-        return pieces
+        ClickHouseTypeArgumentSplitter.topLevel(arguments).segments.map(trimmedSpaces)
     }
 
-    private static func appendByte(
-        _ byte: UInt8,
-        into current: inout [UInt8],
-        pieces: inout [String],
-        depth: inout Int
-    ) {
-        depth += depthDelta(byte)
-        if isTopLevelDelimiter(byte, depth: depth) {
-            pieces.append(trimmed(current))
-            current.removeAll(keepingCapacity: true)
-            return
-        }
-        current.append(byte)
-    }
-
-    private static func isTopLevelDelimiter(_ byte: UInt8, depth: Int) -> Bool {
-        guard byte == comma else { return false }
-        return depth == 0
+    private static func trimmedSpaces(_ text: String) -> String {
+        var view = Substring(text)
+        while view.first == " " { view = view.dropFirst() }
+        while view.last == " " { view = view.dropLast() }
+        return String(view)
     }
 
     private static func leadingNameLength(_ argument: String) -> Int {
         let bytes = Array(argument.utf8)
-        var depth = 0
-        for index in bytes.indices {
-            depth += depthDelta(bytes[index])
-            if isTopLevelSpace(bytes[index], depth: depth) { return index }
+        var cursor = TypeNameCursor()
+        var index = 0
+        while index < bytes.count {
+            if isTopLevelSpace(bytes[index], cursor: &cursor) { return index }
+            index += 1
         }
         return 0
     }
 
-    private static func isTopLevelSpace(_ byte: UInt8, depth: Int) -> Bool {
-        guard byte == space else { return false }
-        return depth == 0
+    private static func isTopLevelSpace(_ byte: UInt8, cursor: inout TypeNameCursor) -> Bool {
+        let atTopLevel = cursor.advance(byte)
+        return byte == space && atTopLevel
+    }
+
+    // Tracks parenthesis depth and single-quote string state so brackets,
+    // commas, and spaces inside an Enum member name are treated as literal
+    // text, not structural delimiters.
+    private struct TypeNameCursor {
+
+        private var depth = 0
+        private var inQuote = false
+        private var escaped = false
+
+        mutating func advance(_ byte: UInt8) -> Bool {
+            if inQuote {
+                return advanceInsideQuote(byte)
+            }
+            if byte == 0x27 { // single quote opens an Enum member name
+                inQuote = true
+                return false
+            }
+            depth += depthDelta(byte)
+            return depth == 0
+        }
+
+        private mutating func advanceInsideQuote(_ byte: UInt8) -> Bool {
+            if escaped {
+                escaped = false
+                return false
+            }
+            escaped = byte == 0x5C // backslash escapes the next byte
+            if byte == 0x27 { inQuote = false }
+            return false
+        }
     }
 
     private static func depthDelta(_ byte: UInt8) -> Int {
@@ -153,16 +166,7 @@ enum ClickHouseGeoTypeName {
         return 0
     }
 
-    private static func trimmed(_ bytes: [UInt8]) -> String {
-        var start = 0
-        var end = bytes.count
-        while start < end, bytes[start] == space { start += 1 }
-        while end > start, bytes[end - 1] == space { end -= 1 }
-        return String(decoding: Array(bytes[start..<end]), as: UTF8.self)
-    }
-
     private static let openParenthesis: UInt8 = 0x28
     private static let closeParenthesis: UInt8 = 0x29
-    private static let comma: UInt8 = 0x2C
     private static let space: UInt8 = 0x20
 }

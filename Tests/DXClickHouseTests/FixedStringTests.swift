@@ -84,4 +84,55 @@ struct ClickHouseFixedStringTests {
         }
         return false
     }
+
+    private enum EncodeOutcome: Sendable, Equatable {
+        case succeeded
+        case rejected(stage: String)
+        case otherError(String)
+    }
+
+    private static func encodeOutcome(of column: ClickHouseTypedColumn) -> EncodeOutcome {
+        let columns = [ClickHouseNamedColumn(name: "id", column: column)]
+        do {
+            _ = try ClickHouseBlockWriter.encodeDataPacket(
+                columns: columns,
+                revision: ClickHouseBlockWriter.revisionWithCustomSerialization
+            )
+            return .succeeded
+        } catch let error {
+            if case .protocolError(let stage, _) = error { return .rejected(stage: stage) }
+            return .otherError(String(describing: error))
+        }
+    }
+
+    private static func bytes(count: Int) -> [UInt8] {
+        (0..<count).map { UInt8($0 & 0xFF) }
+    }
+
+    @Test("block writer rejects an over-length FixedString instead of silently truncating")
+    func blockWriterRejectsOverlongFixedString() {
+        let overlong = Self.bytes(count: 45)
+        let outcome = Self.encodeOutcome(of: .fixedString([overlong], length: 44))
+        #expect(outcome == .rejected(stage: "blockWriter.fixedString"))
+    }
+
+    @Test("block writer rejects an over-length LowCardinality(FixedString) element")
+    func blockWriterRejectsOverlongLowCardinalityFixedString() {
+        let overlong = Self.bytes(count: 45)
+        let outcome = Self.encodeOutcome(of: .lowCardinality([overlong], inner: .fixedString(length: 44)))
+        #expect(outcome == .rejected(stage: "blockWriter.fixedString"))
+    }
+
+    @Test("block writer rejects an over-length Array(FixedString) element")
+    func blockWriterRejectsOverlongArrayFixedString() {
+        let overlong = Self.bytes(count: 45)
+        let outcome = Self.encodeOutcome(of: .array([[overlong]], element: .fixedString(length: 44)))
+        #expect(outcome == .rejected(stage: "blockWriter.fixedString"))
+    }
+
+    @Test("block writer still zero-pads an under-length FixedString without error")
+    func blockWriterPadsUnderlongFixedString() {
+        let outcome = Self.encodeOutcome(of: .fixedString([[1, 2, 3]], length: 8))
+        #expect(outcome == .succeeded)
+    }
 }

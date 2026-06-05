@@ -28,6 +28,7 @@ final class ClickHouseRowEncoderStorage {
 
     private var columns: [Slot] = []
     private var columnIndexByName: [String: Int] = [:]
+    private var deferredAbsentByName: [String: Int] = [:]
     private var rowsEncoded: Int = 0
     private var touched: [Bool] = []
     private var isFirstRow: Bool { rowsEncoded == 0 }
@@ -147,11 +148,50 @@ final class ClickHouseRowEncoderStorage {
     }
 
     func appendDateTime(_ value: Date, forColumn name: String) throws(ClickHouseError) {
+        try Self.requireDateTimeInRange(value, column: name)
         try append(name: name, kind: .dateTime) { $0.appendDateTime(value) }
     }
 
+    func appendDateTimeArray(_ dates: [Date], forColumn name: String) throws(ClickHouseError) {
+        for date in dates {
+            try Self.requireDateTimeInRange(date, column: name)
+        }
+        try appendArray(dates.map { withUnsafeBytes(of: UInt32($0.timeIntervalSince1970).littleEndian) { Array($0) } }, element: .dateTime, forColumn: name)
+    }
+
+    func appendNullableDateTimeArray(_ values: [ClickHouseNullable<Date>], forColumn name: String) throws(ClickHouseError) {
+        var wrapped: [ClickHouseNullable<[UInt8]>] = []
+        wrapped.reserveCapacity(values.count)
+        for entry in values {
+            switch entry {
+            case .present(let date):
+                try Self.requireDateTimeInRange(date, column: name)
+                wrapped.append(.present(withUnsafeBytes(of: UInt32(date.timeIntervalSince1970).littleEndian) { Array($0) }))
+            case .absent:
+                wrapped.append(.absent)
+            }
+        }
+        try appendArrayOfNullable(wrapped, element: .dateTime, forColumn: name)
+    }
+
     func appendNullableDateTime(_ value: ClickHouseNullable<Date>, forColumn name: String) throws(ClickHouseError) {
+        if case .present(let date) = value { try Self.requireDateTimeInRange(date, column: name) }
         try append(name: name, kind: .nullableDateTime) { $0.appendNullableDateTime(value) }
+    }
+
+    // ClickHouse DateTime stores whole seconds since the Unix epoch in a
+    // UInt32, so it represents 1970-01-01 00:00:00 through 2106-02-07
+    // 06:28:15 UTC. A Date outside that window cannot be stored without
+    // changing the value; rejecting at the boundary keeps an out-of-range
+    // timestamp from being silently clamped to the epoch or the maximum.
+    private static func requireDateTimeInRange(_ date: Date, column: String) throws(ClickHouseError) {
+        let seconds = date.timeIntervalSince1970
+        if seconds < 0 || seconds > Double(UInt32.max) {
+            throw .protocolError(
+                stage: "encoder.dateTime",
+                message: "column '\(column)' DateTime value \(seconds)s is outside the representable range 1970-01-01..2106-02-07 (UInt32 seconds); out-of-range values must be rejected, not clamped"
+            )
+        }
     }
 
     func appendUUID(_ value: UUID, forColumn name: String) throws(ClickHouseError) {
@@ -168,6 +208,7 @@ final class ClickHouseRowEncoderStorage {
     }
 
     private static func padToFixedWidth(_ bytes: [UInt8], length: Int, column: String) throws(ClickHouseError) -> [UInt8] {
+        try requirePositiveFixedStringLength(length, column: column)
         if bytes.count > length {
             throw .protocolError(
                 stage: "encoder.fixedString",
@@ -179,6 +220,15 @@ final class ClickHouseRowEncoderStorage {
             padded.append(contentsOf: repeatElement(0, count: length - padded.count))
         }
         return padded
+    }
+
+    private static func requirePositiveFixedStringLength(_ length: Int, column: String) throws(ClickHouseError) {
+        if length < 1 {
+            throw .protocolError(
+                stage: "encoder.fixedString",
+                message: "column '\(column)' FixedString length must be at least 1, got \(length)"
+            )
+        }
     }
 
     func appendLowCardinality(_ value: [UInt8], inner: ClickHouseLowCardinalityInner, forColumn name: String) throws(ClickHouseError) {
@@ -235,6 +285,31 @@ final class ClickHouseRowEncoderStorage {
         }
     }
 
+    func appendMapWithNullableValues(keys: [[UInt8]], values: [ClickHouseNullable<[UInt8]>], keyElement: ClickHouseArrayElementType, valueElement: ClickHouseArrayElementType, forColumn name: String) throws(ClickHouseError) {
+        if keys.count != values.count {
+            throw .protocolError(stage: "encoder.mapWithNullableValues", message: "column '\(name)' map has \(keys.count) keys but \(values.count) values")
+        }
+        let normalizedKeys = try Self.normalizeArrayElements(keys, element: keyElement, column: name)
+        try append(name: name, kind: .mapWithNullableValues(keyElement: keyElement, valueElement: valueElement)) {
+            $0.appendMapWithNullableValues(keys: normalizedKeys, values: values)
+        }
+    }
+
+    func appendMapWithArrayValues(keys: [[UInt8]], values: [[[UInt8]]], keyElement: ClickHouseArrayElementType, valueElement: ClickHouseArrayElementType, forColumn name: String) throws(ClickHouseError) {
+        if keys.count != values.count {
+            throw .protocolError(stage: "encoder.mapWithArrayValues", message: "column '\(name)' map has \(keys.count) keys but \(values.count) value arrays")
+        }
+        let normalizedKeys = try Self.normalizeArrayElements(keys, element: keyElement, column: name)
+        var normalizedValues: [[[UInt8]]] = []
+        normalizedValues.reserveCapacity(values.count)
+        for valueArray in values {
+            normalizedValues.append(try Self.normalizeArrayElements(valueArray, element: valueElement, column: name))
+        }
+        try append(name: name, kind: .mapWithArrayValues(keyElement: keyElement, valueElement: valueElement)) {
+            $0.appendMapWithArrayValues(keys: normalizedKeys, values: normalizedValues)
+        }
+    }
+
     private static func requireEqualEntryCount(keys: [[UInt8]], values: [[UInt8]], column: String) throws(ClickHouseError) {
         if keys.count != values.count {
             throw .protocolError(
@@ -250,6 +325,22 @@ final class ClickHouseRowEncoderStorage {
         let normalizedSecond = try Self.normalizeArrayElements(secondValues, element: secondElement, column: name)
         try append(name: name, kind: .arrayOfTuple(firstElement: firstElement, secondElement: secondElement)) {
             $0.appendArrayOfTuple(firstValues: normalizedFirst, secondValues: normalizedSecond)
+        }
+    }
+
+    // The present element bytes are already produced at the column's wire
+    // width by the container (one Swift scalar per element), so no fixed-width
+    // normalization is needed; absent elements carry no bytes and the block
+    // writer emits the type's zero/empty placeholder for their masked slot.
+    func appendArrayOfNullable(_ value: [ClickHouseNullable<[UInt8]>], element: ClickHouseArrayElementType, forColumn name: String) throws(ClickHouseError) {
+        try append(name: name, kind: .arrayOfNullable(element: element)) {
+            $0.appendArrayOfNullable(value)
+        }
+    }
+
+    func appendNestedArray(_ value: [[[UInt8]]], element: ClickHouseArrayElementType, forColumn name: String) throws(ClickHouseError) {
+        try append(name: name, kind: .nestedArray(element: element)) {
+            $0.appendNestedArray(value)
         }
     }
 
@@ -314,6 +405,14 @@ final class ClickHouseRowEncoderStorage {
         try append(name: name, kind: .bfloat16) { $0.appendBFloat16(rawBits) }
     }
 
+    func appendNullableBFloat16(_ value: ClickHouseNullable<UInt16>, forColumn name: String) throws(ClickHouseError) {
+        try appendNullable(name: name, inner: .bfloat16, value: value) { slot, present in
+            slot.appendBFloat16(present)
+        } sentinel: { slot in
+            slot.appendBFloat16(0)
+        }
+    }
+
     func appendDate(_ days: UInt16, forColumn name: String) throws(ClickHouseError) {
         try append(name: name, kind: .date) { $0.appendDate(days) }
     }
@@ -356,7 +455,26 @@ final class ClickHouseRowEncoderStorage {
     }
 
     func appendDecimal(_ value: ClickHouseDecimal, precision: UInt8, scale: UInt8, forColumn name: String) throws(ClickHouseError) {
+        try Self.requireValidDecimal(precision: precision, scale: scale, column: name)
         try append(name: name, kind: .decimal(precision: precision, scale: scale)) { $0.appendDecimal(value) }
+    }
+
+    // ClickHouse Decimal requires 1 <= precision <= 76 and scale <=
+    // precision; outside that the server rejects the column type with an
+    // opaque error, so reject it at the boundary with the offending values.
+    private static func requireValidDecimal(precision: UInt8, scale: UInt8, column: String) throws(ClickHouseError) {
+        guard (1...76).contains(precision) else {
+            throw .protocolError(
+                stage: "encoder.decimal",
+                message: "column '\(column)' Decimal precision \(precision) must be between 1 and 76"
+            )
+        }
+        if scale > precision {
+            throw .protocolError(
+                stage: "encoder.decimal",
+                message: "column '\(column)' Decimal scale \(scale) must not exceed precision \(precision)"
+            )
+        }
     }
 
     func appendInterval(_ value: Int64, kind: ClickHouseIntervalKind, forColumn name: String) throws(ClickHouseError) {
@@ -379,21 +497,108 @@ final class ClickHouseRowEncoderStorage {
     }
 
     func appendEnum8(_ value: Int8, mapping: [ClickHouseEnumPair], forColumn name: String) throws(ClickHouseError) {
-        try Self.requireValidEnumNames(mapping, column: name)
+        try Self.requireValidEnumMapping(mapping, column: name)
+        try Self.requireEnum8MappingFitsInt8(mapping, column: name)
+        try Self.requireEnumValueInMapping(Int16(value), mapping: mapping, column: name)
         try append(name: name, kind: .enum8(mapping: mapping)) { $0.appendEnum8(value) }
     }
 
     func appendEnum16(_ value: Int16, mapping: [ClickHouseEnumPair], forColumn name: String) throws(ClickHouseError) {
-        try Self.requireValidEnumNames(mapping, column: name)
+        try Self.requireValidEnumMapping(mapping, column: name)
+        try Self.requireEnumValueInMapping(value, mapping: mapping, column: name)
         try append(name: name, kind: .enum16(mapping: mapping)) { $0.appendEnum16(value) }
     }
 
-    private static func requireValidEnumNames(_ mapping: [ClickHouseEnumPair], column: String) throws(ClickHouseError) {
+    func appendEnum8Array(_ values: [Int8], mapping: [ClickHouseEnumPair], forColumn name: String) throws(ClickHouseError) {
+        try Self.requireValidEnumMapping(mapping, column: name)
+        try Self.requireEnum8MappingFitsInt8(mapping, column: name)
+        for value in values {
+            try Self.requireEnumValueInMapping(Int16(value), mapping: mapping, column: name)
+        }
+        try appendArray(values.map { [UInt8(bitPattern: $0)] }, element: .enum8(mapping: mapping), forColumn: name)
+    }
+
+    func appendEnum16Array(_ values: [Int16], mapping: [ClickHouseEnumPair], forColumn name: String) throws(ClickHouseError) {
+        try Self.requireValidEnumMapping(mapping, column: name)
+        for value in values {
+            try Self.requireEnumValueInMapping(value, mapping: mapping, column: name)
+        }
+        try appendArray(values.map { withUnsafeBytes(of: $0.littleEndian) { Array($0) } }, element: .enum16(mapping: mapping), forColumn: name)
+    }
+
+    func appendNullableEnum8Array(_ values: [ClickHouseNullable<Int8>], mapping: [ClickHouseEnumPair], forColumn name: String) throws(ClickHouseError) {
+        try Self.requireValidEnumMapping(mapping, column: name)
+        try Self.requireEnum8MappingFitsInt8(mapping, column: name)
+        var wrapped: [ClickHouseNullable<[UInt8]>] = []
+        wrapped.reserveCapacity(values.count)
+        for entry in values {
+            switch entry {
+            case .present(let value):
+                try Self.requireEnumValueInMapping(Int16(value), mapping: mapping, column: name)
+                wrapped.append(.present([UInt8(bitPattern: value)]))
+            case .absent:
+                wrapped.append(.absent)
+            }
+        }
+        try appendArrayOfNullable(wrapped, element: .enum8(mapping: mapping), forColumn: name)
+    }
+
+    func appendNullableEnum16Array(_ values: [ClickHouseNullable<Int16>], mapping: [ClickHouseEnumPair], forColumn name: String) throws(ClickHouseError) {
+        try Self.requireValidEnumMapping(mapping, column: name)
+        var wrapped: [ClickHouseNullable<[UInt8]>] = []
+        wrapped.reserveCapacity(values.count)
+        for entry in values {
+            switch entry {
+            case .present(let value):
+                try Self.requireEnumValueInMapping(value, mapping: mapping, column: name)
+                wrapped.append(.present(withUnsafeBytes(of: value.littleEndian) { Array($0) }))
+            case .absent:
+                wrapped.append(.absent)
+            }
+        }
+        try appendArrayOfNullable(wrapped, element: .enum16(mapping: mapping), forColumn: name)
+    }
+
+    // The row's ordinal must name one of the mapping entries; otherwise the
+    // server rejects the whole INSERT with an opaque Enum error. Validating
+    // at the boundary surfaces the offending value and column directly.
+    private static func requireEnumValueInMapping(_ value: Int16, mapping: [ClickHouseEnumPair], column: String) throws(ClickHouseError) {
+        for pair in mapping where pair.value == value { return }
+        throw .protocolError(
+            stage: "encoder.enum",
+            message: "column '\(column)' Enum value \(value) is not one of the mapping ordinals"
+        )
+    }
+
+    private static let int8Range = Int16(Int8.min)...Int16(Int8.max)
+
+    private static func requireEnum8MappingFitsInt8(_ mapping: [ClickHouseEnumPair], column: String) throws(ClickHouseError) {
+        for pair in mapping where !int8Range.contains(pair.value) {
+            throw .protocolError(
+                stage: "encoder.enum",
+                message: "column '\(column)' Enum8 mapping ordinal \(pair.value) does not fit Int8"
+            )
+        }
+    }
+
+    private static func requireValidEnumMapping(_ mapping: [ClickHouseEnumPair], column: String) throws(ClickHouseError) {
         if mapping.isEmpty {
             throw .protocolError(stage: "encoder.enum", message: "column '\(column)' has an empty Enum mapping")
         }
+        var seenNames = Set<String>()
+        var seenValues = Set<Int16>()
         for pair in mapping {
             try requireValidEnumName(pair.name, column: column)
+            try requireUniqueEnumEntry(pair, seenNames: &seenNames, seenValues: &seenValues, column: column)
+        }
+    }
+
+    private static func requireUniqueEnumEntry(_ pair: ClickHouseEnumPair, seenNames: inout Set<String>, seenValues: inout Set<Int16>, column: String) throws(ClickHouseError) {
+        if !seenNames.insert(pair.name).inserted {
+            throw .protocolError(stage: "encoder.enum", message: "column '\(column)' Enum mapping repeats name '\(pair.name)'; ClickHouse requires Enum names to be unique")
+        }
+        if !seenValues.insert(pair.value).inserted {
+            throw .protocolError(stage: "encoder.enum", message: "column '\(column)' Enum mapping repeats ordinal \(pair.value); ClickHouse requires Enum ordinals to be unique")
         }
     }
 
@@ -401,8 +606,8 @@ final class ClickHouseRowEncoderStorage {
         if name.isEmpty {
             throw .protocolError(stage: "encoder.enum", message: "column '\(column)' has an empty Enum name")
         }
-        if name.contains(where: { $0 == "'" || $0 == "," || $0 == "\\" }) {
-            throw .protocolError(stage: "encoder.enum", message: "column '\(column)' Enum name '\(name)' must not contain quotes, commas, or backslashes")
+        if name.contains(",") {
+            throw .protocolError(stage: "encoder.enum", message: "column '\(column)' Enum name '\(name)' must not contain a comma; the comma separates entries in the Enum type declaration")
         }
     }
 
@@ -435,7 +640,11 @@ final class ClickHouseRowEncoderStorage {
     }
 
     func appendNullableEnum8(_ value: ClickHouseNullable<Int8>, mapping: [ClickHouseEnumPair], forColumn name: String) throws(ClickHouseError) {
-        try Self.requireValidEnumNames(mapping, column: name)
+        try Self.requireValidEnumMapping(mapping, column: name)
+        try Self.requireEnum8MappingFitsInt8(mapping, column: name)
+        if case .present(let present) = value {
+            try Self.requireEnumValueInMapping(Int16(present), mapping: mapping, column: name)
+        }
         try appendNullable(name: name, inner: .enum8(mapping: mapping), value: value) { slot, present in
             slot.appendEnum8(present)
         } sentinel: { slot in
@@ -444,7 +653,10 @@ final class ClickHouseRowEncoderStorage {
     }
 
     func appendNullableEnum16(_ value: ClickHouseNullable<Int16>, mapping: [ClickHouseEnumPair], forColumn name: String) throws(ClickHouseError) {
-        try Self.requireValidEnumNames(mapping, column: name)
+        try Self.requireValidEnumMapping(mapping, column: name)
+        if case .present(let present) = value {
+            try Self.requireEnumValueInMapping(present, mapping: mapping, column: name)
+        }
         try appendNullable(name: name, inner: .enum16(mapping: mapping), value: value) { slot, present in
             slot.appendEnum16(present)
         } sentinel: { slot in
@@ -534,6 +746,7 @@ final class ClickHouseRowEncoderStorage {
     }
 
     func appendNullableDecimal(_ value: ClickHouseNullable<ClickHouseDecimal>, precision: UInt8, scale: UInt8, forColumn name: String) throws(ClickHouseError) {
+        try Self.requireValidDecimal(precision: precision, scale: scale, column: name)
         try appendNullable(name: name, inner: .decimal(precision: precision, scale: scale), value: value) { slot, present in
             slot.appendDecimal(present)
         } sentinel: { slot in
@@ -541,23 +754,63 @@ final class ClickHouseRowEncoderStorage {
         }
     }
 
+    // A NULL for a column whose type is not yet known (a shaped-wrapper or
+    // RawRepresentable-enum Optional that is nil before any present row has
+    // defined it). The value carries no precision / length / mapping, so the
+    // column type cannot be established here. Record the NULL as deferred and
+    // backfill it once a present row registers the column with its full type;
+    // finishEncoding rejects a column that stays deferred for the whole batch.
     func appendAbsentNullable(forColumn name: String) throws(ClickHouseError) {
         guard let existing = columnIndexByName[name] else {
-            throw .protocolError(
-                stage: "encoder.appendAbsentNullable",
-                message: "column '\(name)' is NULL on its first encoded row; a Nullable wrapper column must carry its type on the first row that defines the column set"
-            )
-        }
-        guard case .nullable(let inner) = columns[existing].kind else {
-            throw .protocolError(
-                stage: "encoder.appendAbsentNullable",
-                message: "column '\(name)' received a NULL value but was declared non-Nullable as \(columns[existing].kind)"
-            )
+            deferredAbsentByName[name, default: 0] += 1
+            return
         }
         let slot = columns[existing]
-        slot.appendMask(true)
-        slot.appendSentinel(of: inner)
+        try Self.appendAbsent(to: slot, name: name)
         touched[existing] = true
+    }
+
+    func finishEncoding() throws(ClickHouseError) {
+        for name in deferredAbsentByName.keys.sorted() {
+            throw .protocolError(
+                stage: "encoder.finishEncoding",
+                message: "column '\(name)' is NULL on every encoded row; a Nullable wrapper column's ClickHouse type cannot be inferred when no row supplies a value. Provide at least one non-NULL value, or use a fixed-type Optional (String?, Int64?, Date?, IPv4?, ...) whose type is known without a value."
+            )
+        }
+    }
+
+    // Appends a NULL to whichever Nullable column the slot declares —
+    // dedicated nullable kinds (registered by the typed encodeIfPresent
+    // overloads, e.g. a present optional enum that wrote its Int32 RawValue
+    // through encodeIfPresent) and the generic Nullable(inner) kind alike.
+    // A non-Nullable column rejects the NULL with a typed error.
+    private static func appendAbsent(to slot: Slot, name: String) throws(ClickHouseError) {
+        switch slot.kind {
+        case .nullable(let inner): slot.appendMask(true); slot.appendSentinel(of: inner)
+        case .nullableString: slot.appendNullableString(.absent)
+        case .nullableBool: slot.appendNullableBool(.absent)
+        case .nullableInt8: slot.appendNullableInt8(.absent)
+        case .nullableInt16: slot.appendNullableInt16(.absent)
+        case .nullableInt32: slot.appendNullableInt32(.absent)
+        case .nullableInt64: slot.appendNullableInt64(.absent)
+        case .nullableUInt8: slot.appendNullableUInt8(.absent)
+        case .nullableUInt16: slot.appendNullableUInt16(.absent)
+        case .nullableUInt32: slot.appendNullableUInt32(.absent)
+        case .nullableUInt64: slot.appendNullableUInt64(.absent)
+        case .nullableFloat32: slot.appendNullableFloat(.absent)
+        case .nullableFloat64: slot.appendNullableDouble(.absent)
+        case .nullableDateTime: slot.appendNullableDateTime(.absent)
+        case .nullableUUID: slot.appendNullableUUID(.absent)
+        case .string, .bool, .int8, .int16, .int32, .int64, .uint8, .uint16, .uint32, .uint64,
+             .float32, .float64, .dateTime, .uuid, .dateTime64, .date, .time, .time64, .fixedString,
+             .enum8, .enum16, .lowCardinality, .array, .date32, .bfloat16, .ipv4, .ipv6, .int128,
+             .uint128, .int256, .uint256, .json, .decimal, .interval, .tuple, .map, .mapWithNullableValues, .mapWithArrayValues, .arrayOfTuple,
+             .arrayOfNullable, .nestedArray, .variant, .dynamic, .aggregateFunction:
+            throw .protocolError(
+                stage: "encoder.appendAbsentNullable",
+                message: "column '\(name)' received a NULL value but was declared non-Nullable as \(slot.kind)"
+            )
+        }
     }
 
     private func appendNullable<Wrapped>(
@@ -590,12 +843,36 @@ final class ClickHouseRowEncoderStorage {
             try requireSameKind(existing: existing, incoming: kind, name: name)
             return existing
         }
+        return try createColumn(name: name, kind: kind)
+    }
+
+    private func createColumn(name: String, kind: SlotKind) throws(ClickHouseError) -> Int {
+        if let deferredCount = deferredAbsentByName[name] {
+            return try createDeferredColumn(name: name, kind: kind, absentCount: deferredCount)
+        }
         guard isFirstRow else {
             throw .protocolError(
                 stage: "encoder.append",
                 message: "row \(rowsEncoded) introduces previously-unseen column '\(name)'; row 0 declares the column set"
             )
         }
+        return registerColumn(name: name, kind: kind)
+    }
+
+    // The first present row of a column whose leading rows were NULL: register
+    // the column with the now-known type, then replay the deferred NULLs into
+    // the leading rows so the column aligns row-for-row with its siblings.
+    private func createDeferredColumn(name: String, kind: SlotKind, absentCount: Int) throws(ClickHouseError) -> Int {
+        let index = registerColumn(name: name, kind: kind)
+        deferredAbsentByName[name] = nil
+        let slot = columns[index]
+        for _ in 0..<absentCount {
+            try Self.appendAbsent(to: slot, name: name)
+        }
+        return index
+    }
+
+    private func registerColumn(name: String, kind: SlotKind) -> Int {
         let newIndex = columns.count
         columns.append(Slot(name: name, kind: kind))
         columnIndexByName[name] = newIndex
@@ -646,7 +923,11 @@ enum SlotKind: Equatable, CustomStringConvertible {
     case interval(kind: ClickHouseIntervalKind)
     case tuple(elements: [ClickHouseArrayElementType])
     case map(keyElement: ClickHouseArrayElementType, valueElement: ClickHouseArrayElementType)
+    case mapWithNullableValues(keyElement: ClickHouseArrayElementType, valueElement: ClickHouseArrayElementType)
+    case mapWithArrayValues(keyElement: ClickHouseArrayElementType, valueElement: ClickHouseArrayElementType)
     case arrayOfTuple(firstElement: ClickHouseArrayElementType, secondElement: ClickHouseArrayElementType)
+    case arrayOfNullable(element: ClickHouseArrayElementType)
+    case nestedArray(element: ClickHouseArrayElementType)
     case variant(members: [ClickHouseArrayElementType])
     case dynamic
     case aggregateFunction(signature: String)
@@ -704,7 +985,11 @@ enum SlotKind: Equatable, CustomStringConvertible {
         case .interval(let kind): kind.typeName
         case .tuple(let elements): "Tuple(\(ClickHouseTupleTypeName.render(elements)))"
         case .map(let keyElement, let valueElement): "Map(\(keyElement.typeName), \(valueElement.typeName))"
+        case .mapWithNullableValues(let keyElement, let valueElement): "Map(\(keyElement.typeName), Nullable(\(valueElement.typeName)))"
+        case .mapWithArrayValues(let keyElement, let valueElement): "Map(\(keyElement.typeName), Array(\(valueElement.typeName)))"
         case .arrayOfTuple(let firstElement, let secondElement): "Array(Tuple(\(firstElement.typeName), \(secondElement.typeName)))"
+        case .arrayOfNullable(let element): "Array(Nullable(\(element.typeName)))"
+        case .nestedArray(let element): "Array(Array(\(element.typeName)))"
         case .variant(let members): "Variant(\(ClickHouseVariantTypeName.render(members)))"
         case .dynamic: "Dynamic"
         case .aggregateFunction(let signature): "AggregateFunction(\(signature))"
@@ -763,8 +1048,12 @@ final class Slot {
     private var tupleValues: [[[UInt8]]] = []
     private var mapKeys: [[[UInt8]]] = []
     private var mapValues: [[[UInt8]]] = []
+    private var mapNullableValues: [[ClickHouseNullable<[UInt8]>]] = []
+    private var mapArrayValues: [[[[UInt8]]]] = []
     private var arrayOfTupleFirst: [[[UInt8]]] = []
     private var arrayOfTupleSecond: [[[UInt8]]] = []
+    private var arrayOfNullableValues: [[ClickHouseNullable<[UInt8]>]] = []
+    private var nestedArrayValues: [[[[UInt8]]]] = []
     private var variantDiscriminators: [UInt8] = []
     private var variantValues: [[UInt8]] = []
     private var dynamicElements: [ClickHouseNullable<ClickHouseArrayElementType>] = []
@@ -827,7 +1116,11 @@ final class Slot {
     func appendArray(_ value: [[UInt8]]) { arrayValues.append(value) }
     func appendTuple(_ value: [[UInt8]]) { tupleValues.append(value) }
     func appendMap(keys: [[UInt8]], values: [[UInt8]]) { mapKeys.append(keys); mapValues.append(values) }
+    func appendMapWithNullableValues(keys: [[UInt8]], values: [ClickHouseNullable<[UInt8]>]) { mapKeys.append(keys); mapNullableValues.append(values) }
+    func appendMapWithArrayValues(keys: [[UInt8]], values: [[[UInt8]]]) { mapKeys.append(keys); mapArrayValues.append(values) }
     func appendArrayOfTuple(firstValues: [[UInt8]], secondValues: [[UInt8]]) { arrayOfTupleFirst.append(firstValues); arrayOfTupleSecond.append(secondValues) }
+    func appendArrayOfNullable(_ value: [ClickHouseNullable<[UInt8]>]) { arrayOfNullableValues.append(value) }
+    func appendNestedArray(_ value: [[[UInt8]]]) { nestedArrayValues.append(value) }
     func appendVariant(discriminator: UInt8, bytes: [UInt8]) { variantDiscriminators.append(discriminator); variantValues.append(bytes) }
     func appendDynamic(element: ClickHouseNullable<ClickHouseArrayElementType>, bytes: [UInt8]) { dynamicElements.append(element); dynamicValues.append(bytes) }
     func appendAggregateState(_ bytes: [UInt8]) { aggregateStates.append(bytes) }
@@ -872,10 +1165,17 @@ final class Slot {
         snapshot(of: kind)
     }
 
+    private static func nullableStringToBytes(_ value: ClickHouseNullable<String>) -> ClickHouseNullable<[UInt8]> {
+        switch value {
+        case .present(let text): .present(Array(text.utf8))
+        case .absent: .absent
+        }
+    }
+
     private func snapshot(of kind: SlotKind) -> ClickHouseTypedColumn {
         switch kind {
-        case .string: .string(stringValues)
-        case .nullableString: .nullableString(nullableStringValues)
+        case .string: .stringValues(stringValues)
+        case .nullableString: .nullableString(nullableStringValues.map { Self.nullableStringToBytes($0) })
         case .bool: .bool(boolValues)
         case .nullableBool: .nullableBool(nullableBoolValues)
         case .int8: .int8(int8Values)
@@ -913,7 +1213,11 @@ final class Slot {
         case .array(let element): .array(arrayValues, element: element)
         case .tuple(let elements): .tuple(ClickHouseTupleColumnBuilder.columns(rows: tupleValues, elements: elements), names: [])
         case .map(let keyElement, let valueElement): .map(keys: mapKeys, values: mapValues, keyElement: keyElement, valueElement: valueElement)
-        case .arrayOfTuple(let firstElement, let secondElement): .arrayOfTuple(firstValues: arrayOfTupleFirst, secondValues: arrayOfTupleSecond, firstElement: firstElement, secondElement: secondElement)
+        case .mapWithNullableValues(let keyElement, let valueElement): .mapWithNullableValues(keys: mapKeys, values: mapNullableValues, keyElement: keyElement, valueElement: valueElement)
+        case .mapWithArrayValues(let keyElement, let valueElement): .mapWithArrayValues(keys: mapKeys, values: mapArrayValues, keyElement: keyElement, valueElement: valueElement)
+        case .arrayOfTuple(let firstElement, let secondElement): .arrayOfTuple(elementValues: [arrayOfTupleFirst, arrayOfTupleSecond], elements: [firstElement, secondElement], names: [])
+        case .arrayOfNullable(let element): .arrayOfNullable(perRow: arrayOfNullableValues, element: element)
+        case .nestedArray(let element): .nestedArray(perRow: nestedArrayValues, element: element)
         case .variant(let members): .variant(members: members, discriminators: variantDiscriminators, values: variantValues)
         case .dynamic: ClickHouseDynamicColumnBuilder.column(elements: dynamicElements, values: dynamicValues)
         case .aggregateFunction(let signature): .aggregateFunction(signature: signature, states: aggregateStates)

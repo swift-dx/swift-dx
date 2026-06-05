@@ -9,6 +9,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+import Synchronization
+
 #if canImport(Glibc)
 import Glibc
 #elseif canImport(Musl)
@@ -49,9 +51,34 @@ public final class ClickHouseConnection {
     public let reconnectionPolicy: ReconnectionPolicy
 
     private var socketHandle: Int32 = -1
+    private var reconnectSuppressed = false
+    // Set from the timeout thread by shutdownSocketForTimeout and consumed
+    // once on the worker thread by the recv that the shutdown unblocks. It
+    // keeps that recv from entering the (potentially unbounded) reconnect
+    // loop, so a query that times out against an unreachable broker fails
+    // promptly instead of wedging the worker — and therefore the caller —
+    // inside reconnect.
+    private let timeoutTeardownRequested = Atomic<Bool>(false)
+    // Set once by requestShutdown() when the owning client/connection is
+    // closed for good. The reconnect loop checks it so an operation issued
+    // after close fails fast instead of reviving the connection and leaking
+    // a worker that spins in the unbounded always-retry reconnect against a
+    // gone endpoint. The internal reconnect/handshake closes do NOT set it;
+    // only the user-facing close path does.
+    private let shutdownRequested = Atomic<Bool>(false)
     private var arena: ClickHouseArena
-    public private(set) var serverInfo: ServerInfo
-    public var negotiatedRevision: UInt64 { min(ClickHouseQueryBuilder.revision, serverInfo.revision) }
+    // The negotiated ServerInfo is written on the connection's worker during
+    // the handshake and every reconnect, but read off that worker — by the
+    // public serverInfo accessor and by the INSERT path resolving the
+    // revision before it hops onto the worker. A plain stored property would
+    // race those reads against a reconnect's write, so the value lives
+    // behind a mutex; the lock is taken a handful of times per query, far
+    // below the wire round-trip, so the cost is irrelevant on the hot path.
+    private let serverInfoStorage: Mutex<ServerInfo>
+    public var serverInfo: ServerInfo { serverInfoStorage.withLock { $0 } }
+    public var negotiatedRevision: UInt64 {
+        min(ClickHouseQueryBuilder.revision, serverInfoStorage.withLock { $0.revision })
+    }
 
     public init(
         host: String,
@@ -68,7 +95,7 @@ public final class ClickHouseConnection {
         self.database = database
         self.reconnectionPolicy = reconnectionPolicy
         self.arena = ClickHouseArena()
-        self.serverInfo = ServerInfo(name: "", major: 0, minor: 0, revision: 0)
+        self.serverInfoStorage = Mutex(ServerInfo(name: "", major: 0, minor: 0, revision: 0))
         try openAndHandshake()
     }
 
@@ -92,9 +119,16 @@ public final class ClickHouseConnection {
         socketHandle = -1
     }
 
+    // Marks the connection as permanently closed so a later operation does
+    // not transparently reconnect. The user-facing close path calls this
+    // before close(); the internal reconnect/handshake closes do not, so
+    // normal reconnection is unaffected.
+    func requestShutdown() {
+        shutdownRequested.store(true, ordering: .releasing)
+    }
+
     public func sendQuery(_ sql: String) throws(ClickHouseError) {
-        let bytes = ClickHouseQueryBuilder.buildQuery(sql)
-        try sendAllWithReconnect(bytes)
+        try sendQuery(sql, queryID: "", settings: .empty, parameters: .empty)
     }
 
     // Full-surface send: caller supplies a query ID (passed through to
@@ -118,12 +152,40 @@ public final class ClickHouseConnection {
     }
 
     // Sends a Ping packet (type=4) and waits for the matching Pong
-    // (type=4) reply. Used by the pool's preflight check to validate a
-    // recycled connection before handing it out. Any non-Pong packet
-    // (in particular an exception emitted while the previous query was
-    // still draining) surfaces a typed protocol error.
+    // (type=4) reply. A transient send failure triggers the connection's
+    // reconnect policy, so a caller using this as an application-level
+    // health check gets the same transparent recovery as a query. Any
+    // non-Pong packet surfaces a typed protocol error.
     public func ping() throws(ClickHouseError) {
         try sendAllWithReconnect(ClickHouseQueryBuilder.buildPing())
+        try readPongReply()
+    }
+
+    // Single-shot liveness probe with NO reconnect. The pool's preflight
+    // uses this to decide whether a recycled idle connection is still
+    // alive: a dead connection must be reported unhealthy so the pool
+    // discards it and opens a fresh one. Routing preflight through the
+    // reconnecting `ping()` instead would, under the always-retry policy,
+    // loop inside reconnect until the broker returned and hang acquire()
+    // far past its timeout.
+    public func pingOnce() throws(ClickHouseError) {
+        reconnectSuppressed = true
+        // Bound the probe's send and recv. A peer that vanished without
+        // sending a FIN (network partition, firewall drop) would otherwise
+        // leave the Pong recv blocking until the OS TCP retransmit timeout
+        // (minutes), hanging the pool preflight that calls this and, with
+        // it, every acquire() waiting on the connection. The timeout makes a
+        // silently-dead connection fail fast so preflight discards it.
+        Self.setSocketTimeout(socketHandle, duration: reconnectionPolicy.handshakeTimeout)
+        defer {
+            Self.setSocketTimeout(socketHandle, duration: .zero)
+            reconnectSuppressed = false
+        }
+        try sendAllOnce(ClickHouseQueryBuilder.buildPing())
+        try readPongReply()
+    }
+
+    private func readPongReply() throws(ClickHouseError) {
         let packetType = try readUVarInt()
         switch packetType {
         case 4:
@@ -156,6 +218,7 @@ public final class ClickHouseConnection {
     // shutdown call sees ENOTCONN and returns without affecting the
     // unrelated FD.
     package func shutdownSocketForTimeout() {
+        timeoutTeardownRequested.store(true, ordering: .releasing)
         let handle = socketHandle
         if handle < 0 { return }
         #if canImport(Darwin)
@@ -165,28 +228,71 @@ public final class ClickHouseConnection {
         #endif
     }
 
-    // Pulls server packets until EndOfStream. Calls `consume` for each
-    // Data packet (Totals/Extremes/Log/ProfileEvents pass through too;
-    // empty header-only blocks are skipped). Returns the cumulative
-    // row count across all data packets.
+    // Pulls server packets until EndOfStream. Calls `consume` only for
+    // genuine result Data packets (type 1). Totals, Extremes, Log, and
+    // ProfileEvents blocks are metadata — they are read off the wire to
+    // stay framed but are NOT delivered to `consume`, so a `WITH TOTALS`
+    // or `extremes=1` query does not inject the totals/extremes block as
+    // a phantom extra result row indistinguishable from real data.
+    // Returns the cumulative row count across the result Data packets.
+    // Runs a result-reading loop and, on any failure that leaves the stream
+    // mid-block — an unsupported or malformed column the copy could not size
+    // and drain, or a truncated packet — closes the connection so the next
+    // operation transparently reconnects instead of reading stale bytes off
+    // the wire. A server query exception is the one clean case: it ends the
+    // result at a packet boundary, so the connection stays usable.
+    func closingOnBrokenRead<Result>(_ body: () throws -> Result) throws(ClickHouseError) -> Result {
+        do {
+            return try body()
+        } catch {
+            let typed = (error as? ClickHouseError) ?? .protocolError(stage: "receiveBlocks", message: "\(error)")
+            if case .queryFailed = typed { throw typed }
+            close()
+            throw typed
+        }
+    }
+
     public func receiveBlocks(_ consume: (ClickHouseBlock, UnsafeRawBufferPointer) throws -> Void) throws(ClickHouseError) -> Int {
-        var totalRows = 0
+        try closingOnBrokenRead {
+            var totalRows = 0
+            while true {
+                switch try readNextDataBlock(consume: consume) {
+                case .block(let rowCount): totalRows += rowCount
+                case .endOfStream: return totalRows
+                }
+            }
+        }
+    }
+
+    // Reads packets forward until the next result Data block — which it delivers
+    // through `consume` and reports as `.block(rowCount:)` — or EndOfStream,
+    // reported as `.endOfStream`. Progress, ProfileInfo, Totals/Extremes, Log,
+    // ProfileEvents, TableColumns, TimezoneUpdate, and Pong packets are read off
+    // the wire to stay framed but are not results, so the loop continues past
+    // them. A server Exception throws `queryFailed` at a clean packet boundary.
+    // Resumable: each call advances exactly one result block, so a backpressured
+    // streaming consumer can pull one block at a time instead of draining the
+    // whole result eagerly. Callers wrap this in `closingOnBrokenRead` so a
+    // broken mid-block read tears the connection down for transparent reconnect.
+    func readNextDataBlock(consume: (ClickHouseBlock, UnsafeRawBufferPointer) throws -> Void) throws(ClickHouseError) -> ClickHouseReceiveStep {
         while true {
             let packetType = try readUVarInt()
             switch packetType {
             case 1: // Data
-                totalRows += try readBlockPacket(revision: negotiatedRevision, consume: consume)
+                let rowCount = try readBlockPacket(revision: negotiatedRevision, consume: consume)
+                return .block(rowCount: rowCount)
             case 2:
                 let exception = try readExceptionPacket()
-                throw .queryFailed(serverException: exception)
+                throw ClickHouseError.queryFailed(serverException: exception)
             case 3:
                 try skipProgressPacket(revision: negotiatedRevision)
             case 5:
-                return totalRows
+                return .endOfStream
             case 6:
                 try skipProfileInfoPacket(revision: negotiatedRevision)
-            case 7, 8: // Totals / Extremes
-                totalRows += try readBlockPacket(revision: negotiatedRevision, consume: consume)
+            case 7, 8: // Totals / Extremes — metadata, not result rows; skip
+                _ = try readString() // table name
+                try skipBlock(revision: negotiatedRevision)
             case 10, 14: // Log / ProfileEvents
                 _ = try readString() // table name
                 try skipBlock(revision: negotiatedRevision)
@@ -198,7 +304,7 @@ public final class ClickHouseConnection {
             case 4: // pong
                 continue
             default:
-                throw .protocolError(stage: "receiveBlocks", message: "unexpected packet type \(packetType)")
+                throw ClickHouseError.protocolError(stage: "receiveBlocks", message: "unexpected packet type \(packetType)")
             }
         }
     }
@@ -233,41 +339,44 @@ public final class ClickHouseConnection {
         callbacks: ReceiveCallbacks,
         _ consume: (ClickHouseBlock, UnsafeRawBufferPointer) throws -> Void
     ) throws(ClickHouseError) -> Int {
-        var totalRows = 0
-        while true {
-            let packetType = try readUVarInt()
-            switch packetType {
-            case 1:
-                totalRows += try readBlockPacket(revision: negotiatedRevision, consume: consume)
-            case 2:
-                let exception = try readExceptionPacket()
-                throw .queryFailed(serverException: exception)
-            case 3:
-                let progress = try readProgressPacket(revision: negotiatedRevision)
-                callbacks.onProgress(progress)
-            case 5:
-                return totalRows
-            case 6:
-                let profileInfo = try readProfileInfoPacket(revision: negotiatedRevision)
-                callbacks.onProfileInfo(profileInfo)
-            case 7, 8:
-                totalRows += try readBlockPacket(revision: negotiatedRevision, consume: consume)
-            case 14:
-                let hostName = try readString()
-                try skipBlock(revision: negotiatedRevision)
-                callbacks.onProfileEvents(ClickHouseProfileEvents(hostName: hostName))
-            case 10:
-                _ = try readString()
-                try skipBlock(revision: negotiatedRevision)
-            case 11:
-                _ = try readString()
-                _ = try readString()
-            case 17:
-                _ = try readString()
-            case 4:
-                continue
-            default:
-                throw .protocolError(stage: "receiveBlocks", message: "unexpected packet type \(packetType)")
+        try closingOnBrokenRead {
+            var totalRows = 0
+            while true {
+                let packetType = try readUVarInt()
+                switch packetType {
+                case 1:
+                    totalRows += try readBlockPacket(revision: negotiatedRevision, consume: consume)
+                case 2:
+                    let exception = try readExceptionPacket()
+                    throw ClickHouseError.queryFailed(serverException: exception)
+                case 3:
+                    let progress = try readProgressPacket(revision: negotiatedRevision)
+                    callbacks.onProgress(progress)
+                case 5:
+                    return totalRows
+                case 6:
+                    let profileInfo = try readProfileInfoPacket(revision: negotiatedRevision)
+                    callbacks.onProfileInfo(profileInfo)
+                case 7, 8: // Totals / Extremes — metadata, not result rows; skip
+                    _ = try readString() // table name
+                    try skipBlock(revision: negotiatedRevision)
+                case 14:
+                    let hostName = try readString()
+                    try skipBlock(revision: negotiatedRevision)
+                    callbacks.onProfileEvents(ClickHouseProfileEvents(hostName: hostName))
+                case 10:
+                    _ = try readString()
+                    try skipBlock(revision: negotiatedRevision)
+                case 11:
+                    _ = try readString()
+                    _ = try readString()
+                case 17:
+                    _ = try readString()
+                case 4:
+                    continue
+                default:
+                    throw ClickHouseError.protocolError(stage: "receiveBlocks", message: "unexpected packet type \(packetType)")
+                }
             }
         }
     }
@@ -279,39 +388,44 @@ public final class ClickHouseConnection {
         callbacks: ReceiveCallbacks,
         _ consume: (Int, [String], [String]) throws -> Void
     ) throws(ClickHouseError) -> Int {
-        var totalRows = 0
-        while true {
-            let packetType = try readUVarInt()
-            switch packetType {
-            case 1, 7, 8:
-                totalRows += try drainBlockPacket(revision: negotiatedRevision, consume: consume)
-            case 2:
-                let exception = try readExceptionPacket()
-                throw .queryFailed(serverException: exception)
-            case 3:
-                let progress = try readProgressPacket(revision: negotiatedRevision)
-                callbacks.onProgress(progress)
-            case 5:
-                return totalRows
-            case 6:
-                let profileInfo = try readProfileInfoPacket(revision: negotiatedRevision)
-                callbacks.onProfileInfo(profileInfo)
-            case 14:
-                let hostName = try readString()
-                try skipBlock(revision: negotiatedRevision)
-                callbacks.onProfileEvents(ClickHouseProfileEvents(hostName: hostName))
-            case 10:
-                _ = try readString()
-                try skipBlock(revision: negotiatedRevision)
-            case 11:
-                _ = try readString()
-                _ = try readString()
-            case 17:
-                _ = try readString()
-            case 4:
-                continue
-            default:
-                throw .protocolError(stage: "receiveBlocksDrain", message: "unexpected packet type \(packetType)")
+        try closingOnBrokenRead {
+            var totalRows = 0
+            while true {
+                let packetType = try readUVarInt()
+                switch packetType {
+                case 1:
+                    totalRows += try drainBlockPacket(revision: negotiatedRevision, consume: consume)
+                case 7, 8: // Totals / Extremes — metadata, not result rows; skip
+                    _ = try readString() // table name
+                    try skipBlock(revision: negotiatedRevision)
+                case 2:
+                    let exception = try readExceptionPacket()
+                    throw ClickHouseError.queryFailed(serverException: exception)
+                case 3:
+                    let progress = try readProgressPacket(revision: negotiatedRevision)
+                    callbacks.onProgress(progress)
+                case 5:
+                    return totalRows
+                case 6:
+                    let profileInfo = try readProfileInfoPacket(revision: negotiatedRevision)
+                    callbacks.onProfileInfo(profileInfo)
+                case 14:
+                    let hostName = try readString()
+                    try skipBlock(revision: negotiatedRevision)
+                    callbacks.onProfileEvents(ClickHouseProfileEvents(hostName: hostName))
+                case 10:
+                    _ = try readString()
+                    try skipBlock(revision: negotiatedRevision)
+                case 11:
+                    _ = try readString()
+                    _ = try readString()
+                case 17:
+                    _ = try readString()
+                case 4:
+                    continue
+                default:
+                    throw ClickHouseError.protocolError(stage: "receiveBlocksDrain", message: "unexpected packet type \(packetType)")
+                }
             }
         }
     }
@@ -325,33 +439,38 @@ public final class ClickHouseConnection {
     // get dropped without ever crossing into Swift `[UInt8]` allocation
     // on the body bytes.
     public func receiveBlocksDrain(_ consume: (Int, [String], [String]) throws -> Void) throws(ClickHouseError) -> Int {
-        var totalRows = 0
-        while true {
-            let packetType = try readUVarInt()
-            switch packetType {
-            case 1, 7, 8:
-                totalRows += try drainBlockPacket(revision: negotiatedRevision, consume: consume)
-            case 2:
-                let exception = try readExceptionPacket()
-                throw .queryFailed(serverException: exception)
-            case 3:
-                try skipProgressPacket(revision: negotiatedRevision)
-            case 5:
-                return totalRows
-            case 6:
-                try skipProfileInfoPacket(revision: negotiatedRevision)
-            case 10, 14:
-                _ = try readString()
-                try skipBlock(revision: negotiatedRevision)
-            case 11:
-                _ = try readString()
-                _ = try readString()
-            case 17:
-                _ = try readString()
-            case 4:
-                continue
-            default:
-                throw .protocolError(stage: "receiveBlocksDrain", message: "unexpected packet type \(packetType)")
+        try closingOnBrokenRead {
+            var totalRows = 0
+            while true {
+                let packetType = try readUVarInt()
+                switch packetType {
+                case 1:
+                    totalRows += try drainBlockPacket(revision: negotiatedRevision, consume: consume)
+                case 7, 8: // Totals / Extremes — metadata, not result rows; skip
+                    _ = try readString() // table name
+                    try skipBlock(revision: negotiatedRevision)
+                case 2:
+                    let exception = try readExceptionPacket()
+                    throw ClickHouseError.queryFailed(serverException: exception)
+                case 3:
+                    try skipProgressPacket(revision: negotiatedRevision)
+                case 5:
+                    return totalRows
+                case 6:
+                    try skipProfileInfoPacket(revision: negotiatedRevision)
+                case 10, 14:
+                    _ = try readString()
+                    try skipBlock(revision: negotiatedRevision)
+                case 11:
+                    _ = try readString()
+                    _ = try readString()
+                case 17:
+                    _ = try readString()
+                case 4:
+                    continue
+                default:
+                    throw ClickHouseError.protocolError(stage: "receiveBlocksDrain", message: "unexpected packet type \(packetType)")
+                }
             }
         }
     }
@@ -364,33 +483,38 @@ public final class ClickHouseConnection {
     // uses this for counting matched values, not for projecting
     // ordered rows). Returns total row count across data blocks.
     public func receiveBlocksExtractingStrings(_ consume: (Int, [String], [String], [[UInt8]]) throws -> Void) throws(ClickHouseError) -> Int {
-        var totalRows = 0
-        while true {
-            let packetType = try readUVarInt()
-            switch packetType {
-            case 1, 7, 8:
-                totalRows += try extractStringsBlockPacket(revision: negotiatedRevision, consume: consume)
-            case 2:
-                let exception = try readExceptionPacket()
-                throw .queryFailed(serverException: exception)
-            case 3:
-                try skipProgressPacket(revision: negotiatedRevision)
-            case 5:
-                return totalRows
-            case 6:
-                try skipProfileInfoPacket(revision: negotiatedRevision)
-            case 10, 14:
-                _ = try readString()
-                try skipBlock(revision: negotiatedRevision)
-            case 11:
-                _ = try readString()
-                _ = try readString()
-            case 17:
-                _ = try readString()
-            case 4:
-                continue
-            default:
-                throw .protocolError(stage: "receiveBlocksExtractingStrings", message: "unexpected packet type \(packetType)")
+        try closingOnBrokenRead {
+            var totalRows = 0
+            while true {
+                let packetType = try readUVarInt()
+                switch packetType {
+                case 1:
+                    totalRows += try extractStringsBlockPacket(revision: negotiatedRevision, consume: consume)
+                case 7, 8: // Totals / Extremes — metadata, not result rows; skip
+                    _ = try readString() // table name
+                    try skipBlock(revision: negotiatedRevision)
+                case 2:
+                    let exception = try readExceptionPacket()
+                    throw ClickHouseError.queryFailed(serverException: exception)
+                case 3:
+                    try skipProgressPacket(revision: negotiatedRevision)
+                case 5:
+                    return totalRows
+                case 6:
+                    try skipProfileInfoPacket(revision: negotiatedRevision)
+                case 10, 14:
+                    _ = try readString()
+                    try skipBlock(revision: negotiatedRevision)
+                case 11:
+                    _ = try readString()
+                    _ = try readString()
+                case 17:
+                    _ = try readString()
+                case 4:
+                    continue
+                default:
+                    throw ClickHouseError.protocolError(stage: "receiveBlocksExtractingStrings", message: "unexpected packet type \(packetType)")
+                }
             }
         }
     }
@@ -470,6 +594,21 @@ public final class ClickHouseConnection {
         try sendAllWithReconnect(bytes)
     }
 
+    // Sends without the reconnect-and-replay step. Used for bytes that are
+    // only meaningful in the middle of an exchange already opened by a
+    // prior sendQuery (an INSERT data block, its terminator). Replaying
+    // those on a freshly handshaked socket — which never received the
+    // INSERT query — would feed the server an unexpected packet and desync
+    // the stream, so a send failure here fails the operation outright and
+    // recovery happens when the next sendQuery reopens the connection.
+    internal func sendAllOnceInternal(_ bytes: [UInt8]) throws(ClickHouseError) {
+        try sendAllOnce(bytes)
+    }
+
+    internal func sendAllVectoredInternal(_ first: [UInt8], _ second: [UInt8]) throws(ClickHouseError) {
+        try sendAllVectored(first, second)
+    }
+
     // Opens a fresh socket, sends Hello, parses ServerHello, sends
     // Addendum. Used by init and by every reconnect attempt. The arena
     // is reset to empty before each handshake to drop any stale bytes
@@ -479,14 +618,36 @@ public final class ClickHouseConnection {
         arena.tail = 0
         let handle = try Self.openSocket(host: host, port: port)
         socketHandle = handle
+        // Bound the handshake: a server that accepts but never answers the
+        // Hello would otherwise park recv forever. Suppress reconnect for
+        // the duration so a timed-out handshake recv fails fast (init
+        // surfaces the error; reconnect's own loop handles retries)
+        // instead of recursively reconnecting.
+        Self.setSocketTimeout(handle, duration: reconnectionPolicy.handshakeTimeout)
+        reconnectSuppressed = true
+        defer { reconnectSuppressed = false }
         do {
             try sendAllOnce(ClickHouseQueryBuilder.buildHello(database: database, user: user, password: password))
-            self.serverInfo = try receiveHello()
-            try sendAllOnce(ClickHouseQueryBuilder.buildAddendum())
+            let negotiated = try receiveHello()
+            serverInfoStorage.withLock { $0 = negotiated }
+            let addendum = ClickHouseQueryBuilder.buildAddendum(serverRevision: negotiated.revision)
+            if !addendum.isEmpty {
+                try sendAllOnce(addendum)
+            }
         } catch {
             close()
             throw error
         }
+        Self.setSocketTimeout(handle, duration: .zero)
+    }
+
+    private static func setSocketTimeout(_ handle: Int32, duration: Duration) {
+        let components = duration.components
+        var tv = timeval()
+        tv.tv_sec = numericCast(components.seconds)
+        tv.tv_usec = numericCast(components.attoseconds / 1_000_000_000_000)
+        setsockopt(handle, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(handle, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
     }
 
     // Reconnect with bounded exponential backoff. Each attempt sleeps
@@ -498,6 +659,9 @@ public final class ClickHouseConnection {
     // treated as "retry forever until the broker comes back". This is
     // the value the always-retry default places in the policy.
     private func reconnect() throws(ClickHouseError) {
+        if shutdownRequested.load(ordering: .acquiring) {
+            throw .connectionFailed(reason: "connection has been closed")
+        }
         if reconnectionPolicy.maxAttempts <= 0 {
             throw .reconnectExhausted(attempts: 0)
         }
@@ -506,16 +670,53 @@ public final class ClickHouseConnection {
         var attempt = 0
         let isUnbounded = reconnectionPolicy.maxAttempts == ReconnectionPolicy.unboundedAttempts
         while isUnbounded || attempt < reconnectionPolicy.maxAttempts {
+            // Re-checked every iteration, not only on entry: close() (or the
+            // owning client's deinit) sets shutdownRequested from another thread,
+            // and under the unbounded always-retry policy a backoff loop against a
+            // gone server would otherwise spin forever, leaking the worker thread
+            // and blocking process exit. The check breaks the loop at the next
+            // wake so a closed or dropped client stops retrying.
+            if shutdownRequested.load(ordering: .acquiring) {
+                throw .connectionFailed(reason: "connection has been closed")
+            }
             attempt += 1
-            sleepFor(duration: backoff)
+            sleepFor(duration: Self.jitteredBackoff(backoff, fraction: Double.random(in: 0..<1)))
             do {
                 try openAndHandshake()
                 return
             } catch {
+                // A server that answers the handshake with an exception
+                // (authentication failed, unknown database, access denied)
+                // is actively refusing this client, not transiently
+                // unreachable. Retrying cannot change the outcome, so fail
+                // fast instead of looping the backoff — and, under the
+                // unbounded always-retry policy, forever.
+                if case .queryFailed = error {
+                    throw error
+                }
                 backoff = nextBackoff(current: backoff)
             }
         }
         throw .reconnectExhausted(attempts: reconnectionPolicy.maxAttempts)
+    }
+
+    // Spreads each reconnect sleep within the lower-and-upper half of the
+    // nominal backoff ("equal jitter"): the wait is at least half the
+    // backoff and at most the full backoff, with `fraction` (in [0, 1))
+    // placing it inside that window. Without this, every connection that
+    // dropped at the same instant would retry in lockstep on identical
+    // 100ms/200ms/400ms boundaries and stampede a recovering broker the
+    // moment it returns. The nominal `backoff` itself is left unchanged so
+    // the exponential growth envelope does not drift across attempts. A
+    // non-positive backoff (the fail-fast/zero case) is returned as-is.
+    static func jitteredBackoff(_ backoff: Duration, fraction: Double) -> Duration {
+        let totalNanoseconds = backoff.components.seconds * 1_000_000_000
+            + backoff.components.attoseconds / 1_000_000_000
+        if totalNanoseconds <= 0 { return backoff }
+        let safeFraction = Swift.min(Swift.max(fraction, 0.0), 0.999_999_999)
+        let half = totalNanoseconds / 2
+        let spread = Int64(Double(half) * safeFraction)
+        return .nanoseconds(half + spread)
     }
 
     private func sleepFor(duration: Duration) {
@@ -560,8 +761,9 @@ public final class ClickHouseConnection {
         if effective >= 54_372 { _ = try readString() } // display name
         if effective >= 54_401 { _ = try readUVarInt() } // version patch
         if effective >= 54_470 {
-            _ = try readString() // chunked send
-            _ = try readString() // chunked recv
+            let chunkedSend = try readString()
+            let chunkedRecv = try readString()
+            try requireUnchunkedProtocol(send: chunkedSend, recv: chunkedRecv)
         }
         if effective >= 54_461 {
             let ruleCount = try readUVarInt()
@@ -584,6 +786,19 @@ public final class ClickHouseConnection {
         if effective >= 54_479 { _ = try readUVarInt() }
     }
 
+    // From revision 54470 the server advertises its chunked-framing preference
+    // for each direction: "notchunked", "chunked", or an "_optional" variant.
+    // This client sends "notchunked" in its addendum and reads unframed blocks,
+    // so an "_optional" peer falls back to unframed. A peer that mandates
+    // "chunked" (exact) would wrap every block in a length-prefixed chunk frame
+    // this client would misread as block bytes, so reject it at the handshake
+    // with a clear error rather than desyncing on the first result.
+    private func requireUnchunkedProtocol(send: String, recv: String) throws(ClickHouseError) {
+        if send == "chunked" || recv == "chunked" {
+            throw .protocolError(stage: "hello", message: "server mandates chunked protocol framing (send=\(send), recv=\(recv)); this client supports only unframed (notchunked) transport")
+        }
+    }
+
     // Walks a Block (interleaved per-column header + body) without
     // exposing it to the caller. Used to drain Log and ProfileEvents
     // packets which carry text-typed columns the floor parser does not
@@ -592,7 +807,8 @@ public final class ClickHouseConnection {
         let prologue = try parsePrologue()
         for _ in 0..<prologue.columnCount {
             let header = try parseColumnHeader(revision: revision)
-            try skipColumnBody(typeName: header.type, rows: prologue.rowCount)
+            let expandedType = ClickHouseGeoTypeName.expand(header.type)
+            try skipColumnBody(typeName: expandedType, rows: prologue.rowCount)
         }
         arena.compact()
     }
@@ -658,12 +874,33 @@ public final class ClickHouseConnection {
             switch outcome {
             case .ready(let name, let type, let consumed):
                 arena.advanceHead(by: consumed)
+                try requireBoundedTypeNesting(type)
                 return (name, type)
             case .needsMoreBytes:
                 try fillMore(minBytes: 1)
             case .malformed(let stage, let message):
                 throw .protocolError(stage: stage, message: message)
             }
+        }
+    }
+
+    // Composite type names nest the type read, parse, skip, and copy paths
+    // one recursion per parenthesis level. The name is server-supplied and
+    // bounded only by the 1 GiB string cap, so a hostile depth such as
+    // Array(Array(...)) tens of thousands deep would overflow the thread
+    // stack before any byte of the body is touched. Bound the nesting here,
+    // once, ahead of every downstream recursion. Real ClickHouse types nest
+    // only a handful of levels.
+    private func requireBoundedTypeNesting(_ type: String) throws(ClickHouseError) {
+        var depth = 0
+        var maxDepth = 0
+        for byte in type.utf8 {
+            if byte == 0x28 { depth += 1 }
+            if byte == 0x29 { depth -= 1 }
+            if depth > maxDepth { maxDepth = depth }
+        }
+        if maxDepth > 64 {
+            throw .protocolError(stage: "column header", message: "column type nesting depth \(maxDepth) exceeds the supported maximum of 64")
         }
     }
 
@@ -685,7 +922,7 @@ public final class ClickHouseConnection {
         }
         if typeName.hasPrefix("Map(") {
             let inner = innerType(typeName: typeName, prefix: "Map(")
-            let (keyType, valueType) = splitMapInner(inner)
+            let (keyType, valueType) = Self.splitMapInner(inner)
             try skipColumnPrefix(typeName: keyType, rows: rows)
             try skipColumnPrefix(typeName: valueType, rows: rows)
             return
@@ -749,7 +986,7 @@ public final class ClickHouseConnection {
             try skipAggregateFunctionBody(typeName: typeName, rows: rows)
             return
         }
-        let byteCount = try columnByteWidth(typeName: typeName, rows: rows)
+        let byteCount = try Self.columnByteWidth(typeName: typeName, rows: rows)
         if byteCount >= 0 {
             try skipBytes(byteCount)
             return
@@ -783,6 +1020,10 @@ public final class ClickHouseConnection {
                 while lengthBytes < maxLengthBytes {
                     let byte = (base + head + lengthBytes)[0]
                     if byte < 0x80 {
+                        if lengthBytes == ClickHouseWire.uvarintMaxBytes - 1 && byte > 1 {
+                            arena.head = head
+                            throw .protocolError(stage: "uvarint", message: "overflow")
+                        }
                         length |= UInt64(byte) << shift
                         lengthBytes += 1
                         break
@@ -799,8 +1040,15 @@ public final class ClickHouseConnection {
                 if lengthBytes == maxLengthBytes && maxLengthBytes < ClickHouseWire.uvarintMaxBytes {
                     break inner
                 }
-                let lengthInt = Int(length)
-                if (tail - head) < lengthBytes + lengthInt {
+                // A String value longer than Int is impossible and would trap
+                // the unchecked conversion; the window comparison is written
+                // as a subtraction so `lengthBytes + lengthInt` can never
+                // overflow either.
+                guard let lengthInt = Int(exactly: length) else {
+                    arena.head = head
+                    throw .protocolError(stage: "decoder.string", message: "string length \(length) exceeds Int range")
+                }
+                if lengthInt > (tail - head) - lengthBytes {
                     break inner
                 }
                 head += lengthBytes + lengthInt
@@ -821,24 +1069,50 @@ public final class ClickHouseConnection {
     //   ... indicesCount values of width keyWidth bytes
     //
     // When rows == 0, no bytes are emitted.
+    // A LowCardinality dictionary is serialized as its inner type's values
+    // directly. For LowCardinality(Nullable(T)) ClickHouse stores the inner
+    // T values with no per-value null mask (the NULL is dictionary index 0),
+    // so reading the dictionary as a Nullable column would consume phantom
+    // mask bytes and desync the stream. The String/FixedString/fixed-width
+    // inners the skip and copy paths handle are dense; reject a Nullable
+    // inner with a clear error instead of misparsing it.
     private func skipLowCardinalityBody(typeName: String, rows: Int) throws(ClickHouseError) {
         if rows == 0 { return }
         let inner = innerType(typeName: typeName, prefix: "LowCardinality(")
+        // See copyLowCardinalityColumnBody: a Nullable inner's dictionary is
+        // the base type T on the wire, so skip it as the base type rather than
+        // aborting mid-block.
+        let dictionaryInner = inner.hasPrefix("Nullable(") ? innerType(typeName: inner, prefix: "Nullable(") : inner
         let serializationType = try readFixedInt(UInt64.self)
-        let keyWidth = lowCardinalityKeyWidth(serializationType: serializationType)
+        let keyWidth = ClickHouseLowCardinalityWire.keyWidth(serializationType: serializationType)
         let dictionarySize = try readFixedInt(UInt64.self)
-        try skipColumnBodyAfterPrefix(typeName: inner, rows: Int(dictionarySize))
+        let dictionaryRows = try boundedByteProduct(dictionarySize, width: 1, stage: "decoder.lowCardinality")
+        try skipColumnBodyAfterPrefix(typeName: dictionaryInner, rows: dictionaryRows)
         let indicesCount = try readFixedInt(UInt64.self)
-        try skipBytes(Int(indicesCount) * keyWidth)
+        try skipBytes(boundedByteProduct(indicesCount, width: keyWidth, stage: "decoder.lowCardinality"))
     }
 
-    private func lowCardinalityKeyWidth(serializationType: UInt64) -> Int {
-        switch serializationType & 0xFF {
-        case 0: return 1
-        case 1: return 2
-        case 2: return 4
-        default: return 8
+    // Converts a server-supplied element count times a per-element width to
+    // an Int byte total, rejecting both an out-of-Int count and a product
+    // that overflows — the unchecked Int(UInt64) conversion or Int
+    // multiplication would otherwise trap and crash the client.
+    private func boundedByteProduct(_ count: UInt64, width: Int, stage: String) throws(ClickHouseError) -> Int {
+        let (product, overflow) = count.multipliedReportingOverflow(by: UInt64(width))
+        guard !overflow, let bytes = Int(exactly: product) else {
+            throw .protocolError(stage: stage, message: "element count \(count) times width \(width) overflows")
         }
+        return bytes
+    }
+
+    // A server-supplied Variant/Dynamic member count converted to Int. The
+    // unchecked Int(UInt64) conversion would trap on a value above Int; the
+    // member-reading loop self-limits against the wire, so only the count
+    // conversion needs guarding (callers cap the reserveCapacity).
+    private func boundedMemberCount(_ raw: UInt64, stage: String) throws(ClickHouseError) -> Int {
+        guard let count = Int(exactly: raw) else {
+            throw .protocolError(stage: stage, message: "member count \(raw) exceeds Int range")
+        }
+        return count
     }
 
     // Array(T) body layout:
@@ -853,7 +1127,7 @@ public final class ClickHouseConnection {
                 totalElements = value
             }
         }
-        try skipColumnBodyAfterPrefix(typeName: inner, rows: Int(totalElements))
+        try skipColumnBodyAfterPrefix(typeName: inner, rows: boundedByteProduct(totalElements, width: 1, stage: "decoder.array"))
     }
 
     // Nullable(T) body layout:
@@ -871,7 +1145,7 @@ public final class ClickHouseConnection {
     //   V column with totalElements rows
     private func skipMapBody(typeName: String, rows: Int) throws(ClickHouseError) {
         let inner = innerType(typeName: typeName, prefix: "Map(")
-        let (keyType, valueType) = splitMapInner(inner)
+        let (keyType, valueType) = Self.splitMapInner(inner)
         var totalElements: UInt64 = 0
         for index in 0..<rows {
             let value = try readFixedInt(UInt64.self)
@@ -879,8 +1153,9 @@ public final class ClickHouseConnection {
                 totalElements = value
             }
         }
-        try skipColumnBodyAfterPrefix(typeName: keyType, rows: Int(totalElements))
-        try skipColumnBodyAfterPrefix(typeName: valueType, rows: Int(totalElements))
+        let elementRows = try boundedByteProduct(totalElements, width: 1, stage: "decoder.map")
+        try skipColumnBodyAfterPrefix(typeName: keyType, rows: elementRows)
+        try skipColumnBodyAfterPrefix(typeName: valueType, rows: elementRows)
     }
 
     // Variant(T0, T1, ...) body layout:
@@ -893,14 +1168,27 @@ public final class ClickHouseConnection {
         _ = try readFixedInt(UInt64.self)
         try ensureBytes(rows)
         var counts = [Int](repeating: 0, count: members.count)
+        // A discriminator (other than the 255 NULL marker) must index a real
+        // member; a hostile server can send one past the end, which would
+        // crash the unchecked `counts[discriminator]` subscript. Capture it
+        // and throw outside the non-throwing read closure.
+        var outOfRange = -1
         arena.withReadPointer { base, _ in
             let discriminators = UnsafeBufferPointer(start: base, count: rows)
             for index in 0..<rows {
-                let discriminator = discriminators[index]
-                if discriminator != 255 { counts[Int(discriminator)] += 1 }
+                let discriminator = Int(discriminators[index])
+                if discriminator == 255 { continue }
+                if discriminator >= counts.count {
+                    outOfRange = discriminator
+                    continue
+                }
+                counts[discriminator] += 1
             }
         }
         arena.advanceHead(by: rows)
+        if outOfRange >= 0 {
+            throw .protocolError(stage: "decoder.variant", message: "discriminator \(outOfRange) out of member range \(members.count)")
+        }
         for index in members.indices {
             try skipColumnBodyAfterPrefix(typeName: members[index].type, rows: counts[index])
         }
@@ -918,9 +1206,10 @@ public final class ClickHouseConnection {
             _ = try readUVarInt()
         }
         let memberCount = try readUVarInt()
+        let memberCountInt = try boundedMemberCount(memberCount, stage: "decoder.dynamic")
         var memberTypes: [String] = []
-        memberTypes.reserveCapacity(Int(memberCount))
-        for _ in 0..<Int(memberCount) {
+        memberTypes.reserveCapacity(Swift.min(memberCountInt, 64))
+        for _ in 0..<memberCountInt {
             memberTypes.append(try readString())
         }
         _ = try readFixedInt(UInt64.self)
@@ -931,7 +1220,7 @@ public final class ClickHouseConnection {
             for index in 0..<rows { rawDiscriminators[index] = discriminators[index] }
         }
         arena.advanceHead(by: rows)
-        let counts = memberPresentCounts(rawDiscriminators, memberCount: Int(memberCount))
+        let counts = memberPresentCounts(rawDiscriminators, memberCount: memberCountInt)
         for index in memberTypes.indices {
             try skipColumnBodyAfterPrefix(typeName: memberTypes[index], rows: counts[index])
         }
@@ -945,7 +1234,7 @@ public final class ClickHouseConnection {
     private func skipJSONBody(rows: Int) throws(ClickHouseError) {
         for _ in 0..<rows {
             let length = try readUVarInt()
-            try skipBytes(Int(length))
+            try skipBytes(boundedByteProduct(length, width: 1, stage: "decoder.json"))
         }
     }
 
@@ -958,27 +1247,11 @@ public final class ClickHouseConnection {
     // Splits `K, V` into (K, V) respecting nesting. Map(K, V) where
     // K or V are themselves composite would have parentheses; we walk
     // depth and split at the top-level comma.
-    private func splitMapInner(_ inner: String) -> (String, String) {
-        var depth = 0
-        var splitOffset = -1
-        let bytes = Array(inner.utf8)
-        for (offset, byte) in bytes.enumerated() {
-            switch byte {
-            case 0x28: depth += 1
-            case 0x29: depth -= 1
-            case 0x2C where depth == 0:
-                splitOffset = offset
-            default:
-                continue
-            }
-            if splitOffset >= 0 { break }
-        }
-        if splitOffset < 0 { return (inner, "") }
-        let keyPart = String(decoding: bytes[0..<splitOffset], as: Unicode.UTF8.self)
-        var valueStart = splitOffset + 1
-        while valueStart < bytes.count, bytes[valueStart] == 0x20 { valueStart += 1 }
-        let valuePart = String(decoding: bytes[valueStart..<bytes.count], as: Unicode.UTF8.self)
-        return (keyPart, valuePart)
+    static func splitMapInner(_ inner: String) -> (String, String) {
+        let segments = ClickHouseTypeArgumentSplitter.topLevel(inner).segments
+        guard segments.count >= 2 else { return (inner, "") }
+        let value = String(segments[1].drop(while: { $0 == " " }))
+        return (segments[0], value)
     }
 
     private func drainBlockPacket(revision: UInt64, consume: (Int, [String], [String]) throws -> Void) throws(ClickHouseError) -> Int {
@@ -1026,8 +1299,9 @@ public final class ClickHouseConnection {
             if expandedType == "String" {
                 try copyStringColumnBody(rows: prologue.rowCount, into: &body)
             } else if expandedType.hasPrefix("FixedString(") {
-                let width = fixedStringWidth(expandedType)
-                try copyFixedBytes(byteCount: width * prologue.rowCount, into: &body)
+                let width = try ClickHouseCodableDecoder.parseFixedStringLength(typeName: expandedType)
+                let byteCount = try boundedByteProduct(UInt64(prologue.rowCount), width: width, stage: "decoder.fixedString")
+                try copyFixedBytes(byteCount: byteCount, into: &body)
             } else {
                 try skipColumnBody(typeName: expandedType, rows: prologue.rowCount)
             }
@@ -1046,16 +1320,10 @@ public final class ClickHouseConnection {
         return prologue.rowCount
     }
 
-    private func fixedStringWidth(_ typeName: String) -> Int {
-        let widthStart = typeName.index(typeName.startIndex, offsetBy: "FixedString(".count)
-        let widthEnd = typeName.firstIndex(of: ")") ?? typeName.endIndex
-        return Int(typeName[widthStart..<widthEnd]) ?? 0
-    }
-
     private func copyStringColumnBody(rows: Int, into output: inout [UInt8]) throws(ClickHouseError) {
         for _ in 0..<rows {
             let length = try readUVarInt()
-            let count = Int(length)
+            let count = try boundedByteProduct(length, width: 1, stage: "decoder.string")
             try ensureBytes(count)
             arena.withReadPointer { base, _ in
                 let buffer = UnsafeBufferPointer(start: base, count: count)
@@ -1172,7 +1440,16 @@ public final class ClickHouseConnection {
             try copyAggregateFunctionColumnBody(typeName: typeName, rows: rows, into: &output)
             return
         }
-        let byteCount = try columnByteWidth(typeName: typeName, rows: rows)
+        // The native JSON type is a length-prefixed binary payload per row,
+        // the same on-wire layout as a String column. We do not structurally
+        // decode it, but copying its body here keeps the block fully read so
+        // the typed decoder rejects the unsupported type at a clean packet
+        // boundary instead of leaving unread bytes that desync the connection.
+        if typeName == "JSON" || typeName.hasPrefix("JSON(") || typeName.hasPrefix("Object(") {
+            try copyLengthPrefixedRows(rows: rows, into: &output)
+            return
+        }
+        let byteCount = try Self.columnByteWidth(typeName: typeName, rows: rows)
         if byteCount >= 0 {
             try ensureBytes(byteCount)
             arena.withReadPointer { base, _ in
@@ -1183,16 +1460,76 @@ public final class ClickHouseConnection {
             return
         }
         // Variable-width (String column). Walk row-by-row.
-        for _ in 0..<rows {
-            let length = try readUVarInt()
-            let count = Int(length)
-            try ensureBytes(count)
-            arena.withReadPointer { base, _ in
-                let buffer = UnsafeBufferPointer(start: base, count: count)
-                ClickHouseWire.writeUVarInt(length, into: &output)
-                output.append(contentsOf: buffer)
+        try copyLengthPrefixedRows(rows: rows, into: &output)
+    }
+
+    // Copies `rows` length-prefixed values (UVarInt length, then that many
+    // bytes) verbatim into `output`, the layout shared by String and the
+    // native JSON column bodies.
+    // A length-prefixed column body (String or native JSON) is a contiguous
+    // run of `[UVarInt length, bytes]` records. The previous per-row loop read
+    // each length, re-wrote it, and appended the bytes through `withReadPointer`
+    // — a class-property exclusivity check and bound recheck on every row that
+    // dominated a string-heavy read. This mirrors the tight `skipStringRows`
+    // scan (snapshot the arena pointer, no per-row ARC) and bulk-copies each
+    // refill window's worth of complete records in a single append. The copy
+    // happens BEFORE the next `fillMore`, because that refill may compact the
+    // arena and discard the bytes already walked — so the run cannot be copied
+    // in one append after the whole scan, only window by window.
+    private func copyLengthPrefixedRows(rows: Int, into output: inout [UInt8]) throws(ClickHouseError) {
+        var remaining = rows
+        while remaining > 0 {
+            let storage = arena.owner
+            var head = arena.head
+            let windowStart = head
+            let tail = arena.tail
+            let base = storage.base
+            inner: while remaining > 0 {
+                let available = tail - head
+                if available <= 0 { break inner }
+                var length: UInt64 = 0
+                var shift: UInt64 = 0
+                var lengthBytes = 0
+                let maxLengthBytes = min(available, ClickHouseWire.uvarintMaxBytes)
+                while lengthBytes < maxLengthBytes {
+                    let byte = (base + head + lengthBytes)[0]
+                    if byte < 0x80 {
+                        if lengthBytes == ClickHouseWire.uvarintMaxBytes - 1 && byte > 1 {
+                            arena.head = head
+                            throw .protocolError(stage: "uvarint", message: "overflow")
+                        }
+                        length |= UInt64(byte) << shift
+                        lengthBytes += 1
+                        break
+                    }
+                    length |= UInt64(byte & 0x7F) << shift
+                    shift += 7
+                    lengthBytes += 1
+                    if lengthBytes == ClickHouseWire.uvarintMaxBytes {
+                        arena.head = head
+                        throw .protocolError(stage: "uvarint", message: "overflow")
+                    }
+                }
+                if lengthBytes == maxLengthBytes && maxLengthBytes < ClickHouseWire.uvarintMaxBytes {
+                    break inner
+                }
+                guard let lengthInt = Int(exactly: length) else {
+                    arena.head = head
+                    throw .protocolError(stage: "decoder.string", message: "string length \(length) exceeds Int range")
+                }
+                if lengthInt > (tail - head) - lengthBytes {
+                    break inner
+                }
+                head += lengthBytes + lengthInt
+                remaining -= 1
             }
-            arena.advanceHead(by: count)
+            if head > windowStart {
+                output.append(contentsOf: UnsafeBufferPointer(start: base + windowStart, count: head - windowStart))
+            }
+            arena.head = head
+            if remaining > 0 {
+                try fillMore(minBytes: 1)
+            }
         }
     }
 
@@ -1202,13 +1539,41 @@ public final class ClickHouseConnection {
     // Codable decoder can lift offsets + inner directly.
     private func copyArrayColumnBody(typeName: String, rows: Int, into output: inout [UInt8]) throws(ClickHouseError) {
         let inner = innerType(typeName: typeName, prefix: "Array(")
-        var totalElements = 0
+        if inner.hasPrefix("LowCardinality(") {
+            try copyArrayOfLowCardinalityColumnBody(innerLowCardinality: inner, rows: rows, into: &output)
+            return
+        }
+        var totalElementsRaw: UInt64 = 0
         for index in 0..<rows {
             let value = try readFixedInt(UInt64.self)
             ClickHouseWire.writeFixedInt(value, into: &output)
-            if index == rows - 1 { totalElements = Int(value) }
+            if index == rows - 1 { totalElementsRaw = value }
         }
+        let totalElements = try boundedByteProduct(totalElementsRaw, width: 1, stage: "decoder.array")
         try copyColumnBody(typeName: inner, rows: totalElements, into: &output)
+    }
+
+    // Array(LowCardinality(T)) hoists the LowCardinality KeysSerializationVersion
+    // ahead of the array offsets (a standalone LowCardinality keeps the version
+    // contiguous with its dictionary body). The dictionary bulk follows the
+    // offsets only when the array carries at least one element; an all-empty
+    // column stops after the version and the single zero offset, so reading the
+    // dictionary header there would block waiting for bytes the server never
+    // sends.
+    private func copyArrayOfLowCardinalityColumnBody(innerLowCardinality: String, rows: Int, into output: inout [UInt8]) throws(ClickHouseError) {
+        guard rows > 0 else { return }
+        let version = try readFixedInt(UInt64.self)
+        ClickHouseWire.writeFixedInt(version, into: &output)
+        var totalElementsRaw: UInt64 = 0
+        for index in 0..<rows {
+            let value = try readFixedInt(UInt64.self)
+            ClickHouseWire.writeFixedInt(value, into: &output)
+            if index == rows - 1 { totalElementsRaw = value }
+        }
+        let totalElements = try boundedByteProduct(totalElementsRaw, width: 1, stage: "decoder.array")
+        guard totalElements > 0 else { return }
+        let lowCardinalityInner = innerType(typeName: innerLowCardinality, prefix: "LowCardinality(")
+        try copyLowCardinalityBulk(lowCardinalityInner: lowCardinalityInner, into: &output)
     }
 
     // LowCardinality(T) body: KeysSerializationVersion, serialization type
@@ -1218,17 +1583,33 @@ public final class ClickHouseConnection {
     private func copyLowCardinalityColumnBody(typeName: String, rows: Int, into output: inout [UInt8]) throws(ClickHouseError) {
         if rows == 0 { return }
         let inner = innerType(typeName: typeName, prefix: "LowCardinality(")
+        // LowCardinality(Nullable(T)) serializes its dictionary as the base
+        // type T (index 0 is the NULL placeholder), the same byte layout as
+        // LowCardinality(T). Read the dictionary as the base type so the block
+        // is fully copied; the typed decoder still rejects the Nullable inner,
+        // but at a clean boundary rather than this copy aborting mid-block and
+        // desyncing the connection for the next request.
         let version = try readFixedInt(UInt64.self)
         ClickHouseWire.writeFixedInt(version, into: &output)
+        try copyLowCardinalityBulk(lowCardinalityInner: inner, into: &output)
+    }
+
+    // The dictionary bulk of a LowCardinality column: serialization type, the
+    // dictionary size and its values, the index count, then the indices at the
+    // serialization type's key width. The KeysSerializationVersion that precedes
+    // it is read by the caller (contiguous for a standalone column, hoisted
+    // ahead of the offsets for Array(LowCardinality)).
+    private func copyLowCardinalityBulk(lowCardinalityInner: String, into output: inout [UInt8]) throws(ClickHouseError) {
+        let dictionaryInner = lowCardinalityInner.hasPrefix("Nullable(") ? innerType(typeName: lowCardinalityInner, prefix: "Nullable(") : lowCardinalityInner
         let serializationType = try readFixedInt(UInt64.self)
         ClickHouseWire.writeFixedInt(serializationType, into: &output)
-        let keyWidth = lowCardinalityKeyWidth(serializationType: serializationType)
+        let keyWidth = ClickHouseLowCardinalityWire.keyWidth(serializationType: serializationType)
         let dictionarySize = try readFixedInt(UInt64.self)
         ClickHouseWire.writeFixedInt(dictionarySize, into: &output)
-        try copyColumnBody(typeName: inner, rows: Int(dictionarySize), into: &output)
+        try copyColumnBody(typeName: dictionaryInner, rows: boundedByteProduct(dictionarySize, width: 1, stage: "decoder.lowCardinality"), into: &output)
         let indicesCount = try readFixedInt(UInt64.self)
         ClickHouseWire.writeFixedInt(indicesCount, into: &output)
-        let indexBytes = Int(indicesCount) * keyWidth
+        let indexBytes = try boundedByteProduct(indicesCount, width: keyWidth, stage: "decoder.lowCardinality")
         try ensureBytes(indexBytes)
         arena.withReadPointer { base, _ in
             output.append(contentsOf: UnsafeBufferPointer(start: base, count: indexBytes))
@@ -1256,16 +1637,50 @@ public final class ClickHouseConnection {
     // for the flattened key and value bodies so the typed Codable decoder
     // can lift offsets + K + V directly.
     private func copyMapColumnBody(typeName: String, rows: Int, into output: inout [UInt8]) throws(ClickHouseError) {
+        guard rows > 0 else { return }
         let inner = innerType(typeName: typeName, prefix: "Map(")
-        let (keyType, valueType) = splitMapInner(inner)
-        var totalElements = 0
+        let (keyType, valueType) = Self.splitMapInner(inner)
+        // A LowCardinality key or value hoists its KeysSerializationVersion ahead
+        // of the map offsets, in key-then-value order, the same as Array
+        // (LowCardinality). Reading the version inline (with the dictionary body)
+        // would mis-frame the block and desync the connection.
+        try copyHoistedLowCardinalityVersion(typeName: keyType, into: &output)
+        try copyHoistedLowCardinalityVersion(typeName: valueType, into: &output)
+        var totalElementsRaw: UInt64 = 0
         for index in 0..<rows {
             let value = try readFixedInt(UInt64.self)
             ClickHouseWire.writeFixedInt(value, into: &output)
-            if index == rows - 1 { totalElements = Int(value) }
+            if index == rows - 1 { totalElementsRaw = value }
         }
-        try copyColumnBody(typeName: keyType, rows: totalElements, into: &output)
-        try copyColumnBody(typeName: valueType, rows: totalElements, into: &output)
+        let totalElements = try boundedByteProduct(totalElementsRaw, width: 1, stage: "decoder.map")
+        try copyMapSideColumnBody(typeName: keyType, totalElements: totalElements, into: &output)
+        try copyMapSideColumnBody(typeName: valueType, totalElements: totalElements, into: &output)
+    }
+
+    private func copyHoistedLowCardinalityVersion(typeName: String, into output: inout [UInt8]) throws(ClickHouseError) {
+        guard typeName.hasPrefix("LowCardinality(") else { return }
+        let version = try readFixedInt(UInt64.self)
+        ClickHouseWire.writeFixedInt(version, into: &output)
+    }
+
+    // A map key or value column. A LowCardinality side's version is hoisted ahead
+    // of the offsets, so only its dictionary bulk follows here — and an all-empty
+    // map omits that bulk entirely. A LowCardinality nested inside another type on
+    // a map side (Array(LowCardinality(...)), Tuple(... LowCardinality ...)) hoists
+    // its version on a different schedule that this walker does not model; copying
+    // it as a plain column would mis-frame the block and hang the connection
+    // waiting for bytes that never arrive, so it is rejected at a clean boundary.
+    private func copyMapSideColumnBody(typeName: String, totalElements: Int, into output: inout [UInt8]) throws(ClickHouseError) {
+        guard typeName.hasPrefix("LowCardinality(") else {
+            guard !typeName.contains("LowCardinality(") else {
+                throw .protocolError(stage: "decoder.map", message: "Map side \(typeName) nests LowCardinality inside another type, which is not supported; select the inner column separately")
+            }
+            try copyColumnBody(typeName: typeName, rows: totalElements, into: &output)
+            return
+        }
+        guard totalElements > 0 else { return }
+        let lowCardinalityInner = innerType(typeName: typeName, prefix: "LowCardinality(")
+        try copyLowCardinalityBulk(lowCardinalityInner: lowCardinalityInner, into: &output)
     }
 
     // Variant(T0, T1, ...) body: an 8-byte basic-discriminators mode
@@ -1283,15 +1698,24 @@ public final class ClickHouseConnection {
         ClickHouseWire.writeFixedInt(modePrefix, into: &output)
         try ensureBytes(rows)
         var counts = [Int](repeating: 0, count: members.count)
+        var outOfRange = -1
         arena.withReadPointer { base, _ in
             let discriminators = UnsafeBufferPointer(start: base, count: rows)
             output.append(contentsOf: discriminators)
             for index in 0..<rows {
-                let discriminator = discriminators[index]
-                if discriminator != 255 { counts[Int(discriminator)] += 1 }
+                let discriminator = Int(discriminators[index])
+                if discriminator == 255 { continue }
+                if discriminator >= counts.count {
+                    outOfRange = discriminator
+                    continue
+                }
+                counts[discriminator] += 1
             }
         }
         arena.advanceHead(by: rows)
+        if outOfRange >= 0 {
+            throw .protocolError(stage: "decoder.variant", message: "discriminator \(outOfRange) out of member range \(members.count)")
+        }
         for index in members.indices {
             try copyColumnBody(typeName: members[index].type, rows: counts[index], into: &output)
         }
@@ -1321,16 +1745,17 @@ public final class ClickHouseConnection {
         }
         let memberCount = try readUVarInt()
         ClickHouseWire.writeUVarInt(memberCount, into: &output)
+        let memberCountInt = try boundedMemberCount(memberCount, stage: "decoder.dynamic")
         var memberTypes: [String] = []
-        memberTypes.reserveCapacity(Int(memberCount))
-        for _ in 0..<Int(memberCount) {
+        memberTypes.reserveCapacity(Swift.min(memberCountInt, 64))
+        for _ in 0..<memberCountInt {
             let name = try readString()
             ClickHouseWire.writeString(name, into: &output)
             memberTypes.append(name)
         }
         let modePrefix = try readFixedInt(UInt64.self)
         ClickHouseWire.writeFixedInt(modePrefix, into: &output)
-        let counts = try copyDynamicDiscriminators(rows: rows, memberCount: Int(memberCount), into: &output)
+        let counts = try copyDynamicDiscriminators(rows: rows, memberCount: memberCountInt, into: &output)
         for index in memberTypes.indices {
             try copyColumnBody(typeName: memberTypes[index], rows: counts[index], into: &output)
         }
@@ -1345,14 +1770,14 @@ public final class ClickHouseConnection {
         if rows == 0 { return }
         let signature = String(typeName.dropFirst("AggregateFunction(".count).dropLast())
         let width = try ClickHouseAggregateStateWidth.width(signature: signature)
-        try copyFixedBytes(byteCount: rows * width, into: &output)
+        try copyFixedBytes(byteCount: boundedByteProduct(UInt64(rows), width: width, stage: "decoder.aggregateFunction"), into: &output)
     }
 
     private func skipAggregateFunctionBody(typeName: String, rows: Int) throws(ClickHouseError) {
         if rows == 0 { return }
         let signature = String(typeName.dropFirst("AggregateFunction(".count).dropLast())
         let width = try ClickHouseAggregateStateWidth.width(signature: signature)
-        try skipBytes(rows * width)
+        try skipBytes(boundedByteProduct(UInt64(rows), width: width, stage: "decoder.aggregateFunction"))
     }
 
     private func copyDynamicDiscriminators(rows: Int, memberCount: Int, into output: inout [UInt8]) throws(ClickHouseError) -> [Int] {
@@ -1385,38 +1810,48 @@ public final class ClickHouseConnection {
         return counts
     }
 
-    private func columnByteWidth(typeName: String, rows: Int) throws(ClickHouseError) -> Int {
+    static func columnByteWidth(typeName: String, rows: Int) throws(ClickHouseError) -> Int {
+        let perRow = try columnWidthPerRow(typeName: typeName)
+        if perRow < 0 { return -1 }
+        // A hostile or corrupt server can declare a row count that, times the
+        // per-row width, exceeds Int — the unchecked product would trap.
+        let (total, overflow) = rows.multipliedReportingOverflow(by: perRow)
+        if overflow {
+            throw .protocolError(stage: "columnByteWidth", message: "row count \(rows) times width \(perRow) overflows for \(typeName)")
+        }
+        return total
+    }
+
+    // Per-row byte width of a fixed-width column type, or -1 for the
+    // variable-width String column. Keeps the row-count multiplication
+    // (and its overflow check) out of the type switch.
+    static func columnWidthPerRow(typeName: String) throws(ClickHouseError) -> Int {
         switch typeName {
-        case "UInt8", "Int8", "Bool": return rows
-        case "UInt16", "Int16", "Date", "BFloat16": return rows * 2
-        case "UInt32", "Int32", "Float32", "DateTime", "IPv4", "Date32", "Time": return rows * 4
-        case "UInt64", "Int64", "Float64": return rows * 8
-        case "UInt128", "Int128", "UUID", "IPv6": return rows * 16
-        case "UInt256", "Int256": return rows * 32
+        case "UInt8", "Int8", "Bool", "Nothing": return 1
+        case "UInt16", "Int16", "Date", "BFloat16": return 2
+        case "UInt32", "Int32", "Float32", "DateTime", "IPv4", "Date32", "Time": return 4
+        case "UInt64", "Int64", "Float64": return 8
+        case "UInt128", "Int128", "UUID", "IPv6": return 16
+        case "UInt256", "Int256": return 32
         case "String": return -1
-        case "Nothing": return rows
         default:
-            if ClickHouseIntervalKind.isKindName(typeName) { return rows * 8 }
-            if typeName.hasPrefix("Enum8(") { return rows }
-            if typeName.hasPrefix("Enum16(") { return rows * 2 }
-            if typeName.hasPrefix("DateTime(") { return rows * 4 }
-            if typeName.hasPrefix("DateTime64(") { return rows * 8 }
-            if typeName.hasPrefix("Time64(") { return rows * 8 }
+            if ClickHouseIntervalKind.isKindName(typeName) { return 8 }
+            if typeName.hasPrefix("Enum8(") { return 1 }
+            if typeName.hasPrefix("Enum16(") { return 2 }
+            if typeName.hasPrefix("DateTime(") { return 4 }
+            if typeName.hasPrefix("DateTime64(") { return 8 }
+            if typeName.hasPrefix("Time64(") { return 8 }
             if typeName.hasPrefix("FixedString(") {
-                let widthStart = typeName.index(typeName.startIndex, offsetBy: "FixedString(".count)
-                let widthEnd = typeName.firstIndex(of: ")") ?? typeName.endIndex
-                let width = Int(typeName[widthStart..<widthEnd]) ?? 0
-                return rows * width
+                return try ClickHouseCodableDecoder.parseFixedStringLength(typeName: typeName)
             }
             if typeName.hasPrefix("Decimal") {
-                let width = try decimalByteWidth(typeName: typeName)
-                return rows * width
+                return try decimalByteWidth(typeName: typeName)
             }
             throw .protocolError(stage: "columnByteWidth", message: "unsupported column type \(typeName)")
         }
     }
 
-    private func decimalByteWidth(typeName: String) throws(ClickHouseError) -> Int {
+    static func decimalByteWidth(typeName: String) throws(ClickHouseError) -> Int {
         if typeName.hasPrefix("Decimal32(") { return 4 }
         if typeName.hasPrefix("Decimal64(") { return 8 }
         if typeName.hasPrefix("Decimal128(") { return 16 }
@@ -1427,13 +1862,23 @@ public final class ClickHouseConnection {
             for byte in inner.utf8 {
                 if byte < 0x30 || byte > 0x39 { break }
                 precision = precision * 10 + Int(byte - 0x30)
+                // ClickHouse Decimal precision is 1...76. Bounding the parse
+                // here keeps a malformed or oversized type name from
+                // overflowing the running total (a crash) or silently
+                // wrapping through UInt8 to the wrong byte width.
+                if precision > 76 {
+                    throw .protocolError(stage: "decimalByteWidth", message: "Decimal precision out of range in \(typeName)")
+                }
             }
-            return ClickHouseDecimalWidth.bytes(forPrecision: UInt8(truncatingIfNeeded: precision))
+            return ClickHouseDecimalWidth.bytes(forPrecision: UInt8(precision))
         }
         throw .protocolError(stage: "columnByteWidth", message: "unsupported column type \(typeName)")
     }
 
-    private func readExceptionPacket() throws(ClickHouseError) -> ClickHouseServerException {
+    private func readExceptionPacket(depth: Int = 0) throws(ClickHouseError) -> ClickHouseServerException {
+        if depth >= 128 {
+            throw .protocolError(stage: "exception", message: "nested server-exception chain exceeds 128 levels")
+        }
         let code = try readFixedInt(Int32.self)
         let name = try readString()
         let message = try readString()
@@ -1441,7 +1886,7 @@ public final class ClickHouseConnection {
         let hasNested = try readByte()
         var nested: [ClickHouseServerException] = []
         if hasNested != 0 {
-            let inner = try readExceptionPacket()
+            let inner = try readExceptionPacket(depth: depth + 1)
             nested.append(inner)
         }
         return ClickHouseServerException(
@@ -1550,6 +1995,9 @@ public final class ClickHouseConnection {
                 while index < cap {
                     let byte = base[index]
                     if byte < 0x80 {
+                        if index == ClickHouseWire.uvarintMaxBytes - 1 && byte > 1 {
+                            throw .protocolError(stage: "uvarint", message: "overflow")
+                        }
                         value |= UInt64(byte) << shift
                         arena.head += index + 1
                         return value
@@ -1598,35 +2046,53 @@ public final class ClickHouseConnection {
         }
     }
 
-    // recv() loop helper. Detects:
-    //  * -1 with EPIPE / ECONNRESET / ENOTCONN / ECONNABORTED → socket
-    //    is gone; reconnect (best-effort) so the *next* sendQuery
-    //    works, and surface `.socketIOFailed` to the caller — the
-    //    in-flight receive cannot be resumed because the server has
-    //    already started streaming a result.
-    //  * -1 with any other errno → surface `.socketIOFailed` as a
-    //    hard error. The connection is reconnected so the next
-    //    sendQuery has a chance to succeed.
-    //  * 0 → unexpected EOF mid-stream; reconnect and throw
-    //    `.unexpectedEOF`.
+    // recv() loop helper. A failed recv cannot be resumed: the server has
+    // already begun streaming a result that a fresh socket could not pick
+    // up mid-stream, so the current read must fail. Rather than reconnect
+    // inline (which would block this caller in the unbounded always-retry
+    // loop for the whole outage to surface an error it raises anyway), it
+    // closes the dead socket and throws; the next sendQuery re-establishes
+    // the connection lazily through sendAllWithReconnect. Two paths own
+    // their own teardown and are left alone (see shouldTearDownSocketAfterRecvFailure):
+    //  * -1 → `.socketIOFailed` with the captured errno.
+    //  * 0 → `.unexpectedEOF` mid-stream.
     private func fillMore(minBytes: Int) throws(ClickHouseError) {
         arena.ensureFreeCapacity(max(minBytes, 4096))
         let storage = arena.owner
-        #if canImport(Darwin)
-        let received = Darwin.recv(socketHandle, storage.base + arena.tail, storage.capacity - arena.tail, 0)
-        #else
-        let received = Glibc.recv(socketHandle, storage.base + arena.tail, storage.capacity - arena.tail, 0)
-        #endif
+        var received = 0
+        repeat {
+            #if canImport(Darwin)
+            received = Darwin.recv(socketHandle, storage.base + arena.tail, storage.capacity - arena.tail, 0)
+            #else
+            received = Glibc.recv(socketHandle, storage.base + arena.tail, storage.capacity - arena.tail, 0)
+            #endif
+        } while received < 0 && errno == EINTR
         if received < 0 {
             let capturedErrno = errno
-            try? reconnect()
+            if shouldTearDownSocketAfterRecvFailure() { close() }
             throw .socketIOFailed(errno: capturedErrno, syscall: "recv")
         }
         if received == 0 {
-            try? reconnect()
+            if shouldTearDownSocketAfterRecvFailure() { close() }
             throw .unexpectedEOF(bytesExpected: minBytes)
         }
         arena.tail += received
+    }
+
+    // A recv failure mid-stream leaves the socket unusable: the server's
+    // in-flight result stream cannot be resumed on a fresh connection, so
+    // the current operation must fail. Reconnecting inline here would not
+    // rescue this query (it fails regardless) and, under the unbounded
+    // always-retry policy, would block this caller in the reconnect loop
+    // for the entire broker outage. Instead close the dead socket so the
+    // NEXT operation's send-with-reconnect re-establishes it lazily, and
+    // surface the I/O error now. Two paths own their own socket teardown
+    // and must be left alone: an in-progress single-shot pingOnce probe,
+    // and a recv that a timeout teardown already shut the socket for.
+    private func shouldTearDownSocketAfterRecvFailure() -> Bool {
+        if reconnectSuppressed { return false }
+        if timeoutTeardownRequested.exchange(false, ordering: .acquiringAndReleasing) { return false }
+        return true
     }
 
     // Send-with-reconnect entry point used by `sendQuery`. A query has
@@ -1676,6 +2142,7 @@ public final class ClickHouseConnection {
                 let written = Glibc.send(handle, base + offset, totalCount - offset, Int32(MSG_NOSIGNAL))
                 #endif
                 if written < 0 {
+                    if errno == EINTR { continue }
                     return .failed(.socketIOFailed(errno: errno, syscall: "send"))
                 }
                 if written == 0 {
@@ -1684,6 +2151,53 @@ public final class ClickHouseConnection {
                 offset += written
             }
             return .completed
+        }
+        if case .failed(let error) = outcome { throw error }
+    }
+
+    // Sends two buffers as one contiguous write via writev, so the caller's
+    // payload and a trailing marker leave in a single syscall without
+    // concatenating them into a new buffer. Used by the INSERT path to emit
+    // the data block and its empty terminator together, keeping them in one
+    // segment so a partial-read peer cannot interleave the terminator with the
+    // next request. Partial writes are handled by advancing past whichever
+    // buffer the kernel has already drained.
+    private func sendAllVectored(_ first: [UInt8], _ second: [UInt8]) throws(ClickHouseError) {
+        let handle = socketHandle
+        let outcome: SendOutcome = first.withUnsafeBufferPointer { firstBuffer -> SendOutcome in
+            second.withUnsafeBufferPointer { secondBuffer -> SendOutcome in
+                let firstCount = firstBuffer.count
+                let secondCount = secondBuffer.count
+                var firstOffset = 0
+                var secondOffset = 0
+                while firstOffset < firstCount || secondOffset < secondCount {
+                    var vectors: [iovec] = []
+                    if firstOffset < firstCount, let base = firstBuffer.baseAddress {
+                        vectors.append(iovec(iov_base: UnsafeMutableRawPointer(mutating: base + firstOffset), iov_len: firstCount - firstOffset))
+                    }
+                    if secondOffset < secondCount, let base = secondBuffer.baseAddress {
+                        vectors.append(iovec(iov_base: UnsafeMutableRawPointer(mutating: base + secondOffset), iov_len: secondCount - secondOffset))
+                    }
+                    let written = vectors.withUnsafeBufferPointer { vectorBuffer in
+                        writev(handle, vectorBuffer.baseAddress, Int32(vectorBuffer.count))
+                    }
+                    if written < 0 {
+                        if errno == EINTR { continue }
+                        return .failed(.socketIOFailed(errno: errno, syscall: "writev"))
+                    }
+                    if written == 0 {
+                        return .failed(.unexpectedEOF(bytesExpected: (firstCount - firstOffset) + (secondCount - secondOffset)))
+                    }
+                    let firstRemaining = firstCount - firstOffset
+                    if written <= firstRemaining {
+                        firstOffset += written
+                    } else {
+                        secondOffset += written - firstRemaining
+                        firstOffset = firstCount
+                    }
+                }
+                return .completed
+            }
         }
         if case .failed(let error) = outcome { throw error }
     }

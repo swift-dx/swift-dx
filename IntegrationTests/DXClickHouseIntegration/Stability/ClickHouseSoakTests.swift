@@ -39,9 +39,18 @@ import Testing
 //              loop's count assertion.
 extension Stability {
 
+// Gated behind CH_LONG_RUNNING, the same as the one-hour soak. The pass
+// criterion is process resident-set growth against a fixed ceiling, which is a
+// whole-process measurement: when this runs inside the default `swift test`
+// alongside the rest of the integration suite, the other tests' peak
+// allocations (which the allocator does not return to the OS) land in this
+// process's RSS and inflate the reading, so the bound tracks unrelated suite
+// growth rather than the client's own steady state and fails as false positive.
+// Run it in its own invocation (CH_LONG_RUNNING=1, ideally with a filter) so
+// the RSS bound measures only the client under sustained load.
 @Suite(
     "DXClickHouse stability — soak (every Raw client mode in a loop)",
-    .enabled(if: ProcessInfo.processInfo.environment["CH_INTEGRATION_HOST"] != nil),
+    .enabled(if: ProcessInfo.processInfo.environment["CH_INTEGRATION_HOST"] != nil && ProcessInfo.processInfo.environment["CH_LONG_RUNNING"] == "1"),
     .serialized
 )
 struct ClickHouseSoakTests {

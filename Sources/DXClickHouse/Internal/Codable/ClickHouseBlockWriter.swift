@@ -30,17 +30,48 @@ import Foundation
 // count. The caller (ClickHouseRowEncoderStorage.materialize) only
 // produces well-shaped columns, but a divergence here would surface a
 // confusing server-side error, so a runtime check guards the assumption.
-public enum ClickHouseBlockWriter {
+package enum ClickHouseBlockWriter {
 
-    public static let revisionWithCustomSerialization: UInt64 = 54_454
+    package static let revisionWithCustomSerialization: UInt64 = 54_454
 
-    public static func encodeDataPacket(
+    package static func encodeDataPacket(
         columns: [ClickHouseNamedColumn],
         revision: UInt64
     ) throws(ClickHouseError) -> [UInt8] {
         let rowCount = try sharedRowCount(columns: columns)
+        try validateColumnConstraints(columns: columns)
         var output: [UInt8] = []
         output.reserveCapacity(estimateCapacity(columns: columns, rowCount: rowCount))
+        appendDataBlock(columns: columns, revision: revision, rowCount: rowCount, into: &output)
+        return output
+    }
+
+    // Data packet followed immediately by the empty terminator packet, built
+    // into one buffer. An INSERT always sends the data block and then the
+    // empty end-of-stream block back to back, so emitting them as a single
+    // contiguous write keeps the two from landing in separate TCP segments
+    // (which a partial-read peer could interleave with the next request) and
+    // saves a syscall on the insert hot path. The terminator capacity is
+    // reserved up front so appending it does not reallocate the data buffer.
+    package static func encodeDataPacketTerminated(
+        columns: [ClickHouseNamedColumn],
+        revision: UInt64
+    ) throws(ClickHouseError) -> [UInt8] {
+        let rowCount = try sharedRowCount(columns: columns)
+        try validateColumnConstraints(columns: columns)
+        var output: [UInt8] = []
+        output.reserveCapacity(estimateCapacity(columns: columns, rowCount: rowCount) + emptyDataPacketByteCount)
+        appendDataBlock(columns: columns, revision: revision, rowCount: rowCount, into: &output)
+        appendEmptyDataPacket(into: &output)
+        return output
+    }
+
+    private static func appendDataBlock(
+        columns: [ClickHouseNamedColumn],
+        revision: UInt64,
+        rowCount: Int,
+        into output: inout [UInt8]
+    ) {
         ClickHouseWire.writeUVarInt(2, into: &output) // packet type: Data
         ClickHouseWire.writeString("", into: &output) // table name
         appendBlockInfo(into: &output)
@@ -54,22 +85,27 @@ public enum ClickHouseBlockWriter {
             }
             writeColumnBody(column: namedColumn.column, into: &output)
         }
-        return output
     }
 
     // Empty Data packet that terminates the client-side INSERT stream.
     // Same as `ClickHouseQueryBuilder.appendEmptyDataPacket` but
     // produces a standalone packet rather than appending to a Query
     // packet's tail.
-    public static func encodeEmptyDataPacket() -> [UInt8] {
+    package static func encodeEmptyDataPacket() -> [UInt8] {
         var output: [UInt8] = []
-        output.reserveCapacity(16)
+        output.reserveCapacity(emptyDataPacketByteCount)
+        appendEmptyDataPacket(into: &output)
+        return output
+    }
+
+    private static let emptyDataPacketByteCount = 16
+
+    private static func appendEmptyDataPacket(into output: inout [UInt8]) {
         ClickHouseWire.writeUVarInt(2, into: &output)
         ClickHouseWire.writeString("", into: &output)
         appendBlockInfo(into: &output)
         ClickHouseWire.writeUVarInt(0, into: &output)
         ClickHouseWire.writeUVarInt(0, into: &output)
-        return output
     }
 
     private static func sharedRowCount(columns: [ClickHouseNamedColumn]) throws(ClickHouseError) -> Int {
@@ -82,6 +118,133 @@ public enum ClickHouseBlockWriter {
             )
         }
         return expected
+    }
+
+    // Every FixedString-typed byte slot reaches the wire through
+    // `writeFixedStringValue`, which zero-pads an under-length value and,
+    // for over-length input, can only truncate because it runs inside the
+    // non-throwing column-body writer. Truncating a fixed-width value
+    // silently corrupts the row (a FixedString(44) primary key clipped to
+    // 44 bytes is the wrong key), so the contract is that over-length
+    // values are rejected, never truncated. The Codable encode path
+    // enforces this per value; this pass closes the same gap for callers
+    // that construct ClickHouseTypedColumn values directly.
+    private static func validateColumnConstraints(columns: [ClickHouseNamedColumn]) throws(ClickHouseError) {
+        for namedColumn in columns {
+            try validateColumn(namedColumn.column, columnName: namedColumn.name)
+        }
+    }
+
+    private static func validateColumn(_ column: ClickHouseTypedColumn, columnName: String) throws(ClickHouseError) {
+        switch column {
+        case .fixedString(let values, let length):
+            try requireFixedWidth(values, width: length, columnName: columnName)
+        case .ipv6(let values):
+            try requireFixedWidth(values, width: 16, columnName: columnName)
+        case .dateTime(let values):
+            try requireDateTimesInRange(values, columnName: columnName)
+        case .nullableDateTime(let values):
+            try requireNullableDateTimesInRange(values, columnName: columnName)
+        case .decimal(let values, let precision, _):
+            try requireDecimalsFitPrecision(values, precision: precision, columnName: columnName)
+        case .lowCardinality(let values, let inner):
+            try validateLowCardinalityFixedWidth(values, inner: inner, columnName: columnName)
+        case .array(let values, let element):
+            try validateElementRowsFixedWidth(values, element: element, columnName: columnName)
+        case .map(let keys, let values, let keyElement, let valueElement):
+            try validateElementRowsFixedWidth(keys, element: keyElement, columnName: columnName)
+            try validateElementRowsFixedWidth(values, element: valueElement, columnName: columnName)
+        case .arrayOfTuple(let elementValues, let elements, _):
+            for index in elements.indices {
+                try validateElementRowsFixedWidth(elementValues[index], element: elements[index], columnName: columnName)
+            }
+        case .tuple(let inners, _):
+            for inner in inners { try validateColumn(inner, columnName: columnName) }
+        case .nullable(_, let inner):
+            try validateColumn(inner, columnName: columnName)
+        case .mapWithNullableValues(let keys, _, let keyElement, _):
+            try validateElementRowsFixedWidth(keys, element: keyElement, columnName: columnName)
+        default:
+            break
+        }
+    }
+
+    private static func requireNullableDateTimesInRange(_ values: [ClickHouseNullable<Date>], columnName: String) throws(ClickHouseError) {
+        for entry in values {
+            guard case .present(let date) = entry else { continue }
+            try requireDateTimeInRange(date, columnName: columnName)
+        }
+    }
+
+    private static func requireDateTimesInRange(_ values: [Date], columnName: String) throws(ClickHouseError) {
+        for date in values {
+            try requireDateTimeInRange(date, columnName: columnName)
+        }
+    }
+
+    private static func requireDateTimeInRange(_ date: Date, columnName: String) throws(ClickHouseError) {
+        let seconds = date.timeIntervalSince1970
+        if seconds < 0 || seconds > Double(UInt32.max) {
+            throw .protocolError(
+                stage: "blockWriter.dateTime",
+                message: "column '\(columnName)' DateTime value \(seconds)s is outside the representable range 1970-01-01..2106-02-07 (UInt32 seconds); out-of-range values must be rejected, not clamped"
+            )
+        }
+    }
+
+    private static func validateLowCardinalityFixedWidth(_ values: [[UInt8]], inner: ClickHouseLowCardinalityInner, columnName: String) throws(ClickHouseError) {
+        guard case .fixedString(let length) = inner else { return }
+        try requireFixedWidth(values, width: length, columnName: columnName)
+    }
+
+    private static func validateElementRowsFixedWidth(_ rows: [[[UInt8]]], element: ClickHouseArrayElementType, columnName: String) throws(ClickHouseError) {
+        guard case .fixedString(let length) = element else { return }
+        for row in rows {
+            try requireFixedWidth(row, width: length, columnName: columnName)
+        }
+    }
+
+    // The wire writer emits only the precision's byte width for a Decimal,
+    // so a value whose two's-complement representation needs more bytes than
+    // that width would be truncated on the wire — silent corruption. A value
+    // fits the width iff every byte at or beyond `width` is the sign
+    // extension of the last in-range byte's top bit.
+    private static func requireDecimalsFitPrecision(_ values: [ClickHouseDecimal], precision: UInt8, columnName: String) throws(ClickHouseError) {
+        let width = ClickHouseDecimalWidth.bytes(forPrecision: precision)
+        for value in values where !decimalFitsWidth(value, width: width) {
+            throw .protocolError(
+                stage: "blockWriter.decimal",
+                message: "column '\(columnName)' Decimal value exceeds Decimal precision \(precision) (\(width)-byte storage); over-range values must be rejected, not truncated"
+            )
+        }
+    }
+
+    private static func decimalFitsWidth(_ value: ClickHouseDecimal, width: Int) -> Bool {
+        if width >= 32 { return true }
+        let bytes = decimalLittleEndianBytes(value)
+        let signByte: UInt8 = (bytes[width - 1] & 0x80) != 0 ? 0xFF : 0x00
+        for index in width..<32 where bytes[index] != signByte {
+            return false
+        }
+        return true
+    }
+
+    private static func decimalLittleEndianBytes(_ value: ClickHouseDecimal) -> [UInt8] {
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(32)
+        for limb in [value.limb0, value.limb1, value.limb2, value.limb3] {
+            withUnsafeBytes(of: limb.littleEndian) { bytes.append(contentsOf: $0) }
+        }
+        return bytes
+    }
+
+    private static func requireFixedWidth(_ values: [[UInt8]], width: Int, columnName: String) throws(ClickHouseError) {
+        for value in values where value.count > width {
+            throw .protocolError(
+                stage: "blockWriter.fixedString",
+                message: "column '\(columnName)' value is \(value.count) bytes, exceeds FixedString(\(width)); over-length values must be rejected, not truncated"
+            )
+        }
     }
 
     private static func appendBlockInfo(into output: inout [UInt8]) {
@@ -112,7 +275,8 @@ public enum ClickHouseBlockWriter {
         case .nullableUInt32, .nullableInt32, .nullableFloat32, .nullableDateTime: rowCount * 5
         case .nullableUInt64, .nullableInt64, .nullableFloat64: rowCount * 9
         case .nullableUUID: rowCount * 17
-        case .string(let values): values.reduce(0) { $0 + 10 + $1.utf8.count }
+        case .string(let values): values.reduce(0) { $0 + 10 + $1.count }
+        case .stringValues(let values): values.reduce(0) { $0 + 10 + $1.utf8.count }
         case .nullableString(let values): rowCount + values.reduce(0) { $0 + 10 + presentStringByteCount($1) }
         case .fixedString(_, let length): rowCount * length
         case .enum8: rowCount
@@ -130,8 +294,16 @@ public enum ClickHouseBlockWriter {
         case .tuple(let columns, _): columns.reduce(0) { $0 + estimateColumnSize(column: $1, rowCount: rowCount) }
         case .map(let keys, let values, _, _):
             rowCount * 8 + (elementCount(keys) + elementCount(values)) * 24
-        case .arrayOfTuple(let firstValues, let secondValues, _, _):
-            rowCount * 8 + (elementCount(firstValues) + elementCount(secondValues)) * 24
+        case .mapWithNullableValues(let keys, _, _, _):
+            rowCount * 8 + elementCount(keys) * 48
+        case .mapWithArrayValues(let keys, let values, _, _):
+            rowCount * 8 + elementCount(keys) * 24 + values.reduce(0) { outer, row in outer + row.reduce(0) { $0 + $1.count } } * 24
+        case .arrayOfTuple(let elementValues, _, _):
+            rowCount * 8 + elementValues.reduce(0) { $0 + elementCount($1) } * 24
+        case .arrayOfNullable(let perRow, _):
+            rowCount * 8 + perRow.reduce(0) { $0 + $1.count } * 24
+        case .nestedArray(let perRow, _):
+            rowCount * 8 + perRow.reduce(0) { $0 + $1.count } * 48
         case .variant(_, _, let values):
             8 + rowCount + values.reduce(0) { $0 + 9 + $1.count }
         case .dynamic(let members, _, let values):
@@ -147,9 +319,9 @@ public enum ClickHouseBlockWriter {
         return total
     }
 
-    private static func presentStringByteCount(_ nullable: ClickHouseNullable<String>) -> Int {
+    private static func presentStringByteCount(_ nullable: ClickHouseNullable<[UInt8]>) -> Int {
         switch nullable {
-        case .present(let value): value.utf8.count
+        case .present(let value): value.count
         case .absent: 0
         }
     }
@@ -157,6 +329,7 @@ public enum ClickHouseBlockWriter {
     private static func writeColumnBody(column: ClickHouseTypedColumn, into output: inout [UInt8]) {
         switch column {
         case .string(let values): writeStrings(values, into: &output)
+        case .stringValues(let values): writeStringValuesDirect(values, into: &output)
         case .nullableString(let values): writeNullableStrings(values, into: &output)
         case .bool(let values):
             for value in values { output.append(value ? 1 : 0) }
@@ -261,8 +434,16 @@ public enum ClickHouseBlockWriter {
             for inner in columns { writeColumnBody(column: inner, into: &output) }
         case .map(let keys, let values, let keyElement, let valueElement):
             writeMap(keys: keys, values: values, keyElement: keyElement, valueElement: valueElement, into: &output)
-        case .arrayOfTuple(let firstValues, let secondValues, let firstElement, let secondElement):
-            writeMap(keys: firstValues, values: secondValues, keyElement: firstElement, valueElement: secondElement, into: &output)
+        case .mapWithNullableValues(let keys, let values, let keyElement, let valueElement):
+            writeMapWithNullableValues(keys: keys, values: values, keyElement: keyElement, valueElement: valueElement, into: &output)
+        case .mapWithArrayValues(let keys, let values, let keyElement, let valueElement):
+            writeMapWithArrayValues(keys: keys, values: values, keyElement: keyElement, valueElement: valueElement, into: &output)
+        case .arrayOfTuple(let elementValues, let elements, _):
+            writeArrayOfTuple(elementValues: elementValues, elements: elements, into: &output)
+        case .arrayOfNullable(let perRow, let element):
+            writeArrayOfNullable(perRow: perRow, element: element, into: &output)
+        case .nestedArray(let perRow, let element):
+            writeNestedArray(perRow: perRow, element: element, into: &output)
         case .variant(let members, let discriminators, let values):
             writeVariant(members: members, discriminators: discriminators, values: values, into: &output)
         case .dynamic(let members, let discriminators, let values):
@@ -277,17 +458,33 @@ public enum ClickHouseBlockWriter {
     }
 
     @inline(__always)
-    private static func writeStrings(_ values: [String], into output: inout [UInt8]) {
-        for value in values { ClickHouseWire.writeString(value, into: &output) }
+    private static func writeStrings(_ values: [[UInt8]], into output: inout [UInt8]) {
+        for value in values { writeLengthPrefixedBytes(value, into: &output) }
+    }
+
+    // Serializes a String column without first materializing every value into a
+    // separate [UInt8]. `withUTF8` exposes the string's contiguous utf8 storage
+    // (already contiguous for native strings, so no copy), which is written
+    // length-prefixed straight into the output buffer. This is the hot path for
+    // the columnar insert; the per-value [UInt8] array the `.string` variant
+    // requires dominated encode time on a string-heavy batch.
+    private static func writeStringValuesDirect(_ values: [String], into output: inout [UInt8]) {
+        for value in values {
+            var string = value
+            string.withUTF8 { utf8 in
+                ClickHouseWire.writeUVarInt(UInt64(utf8.count), into: &output)
+                output.append(contentsOf: utf8)
+            }
+        }
     }
 
     @inline(__always)
-    private static func writeNullableStrings(_ values: [ClickHouseNullable<String>], into output: inout [UInt8]) {
+    private static func writeNullableStrings(_ values: [ClickHouseNullable<[UInt8]>], into output: inout [UInt8]) {
         writeNullMask(values, into: &output)
         for entry in values {
             switch entry {
-            case .present(let value): ClickHouseWire.writeString(value, into: &output)
-            case .absent: ClickHouseWire.writeString("", into: &output)
+            case .present(let value): writeLengthPrefixedBytes(value, into: &output)
+            case .absent: writeLengthPrefixedBytes([], into: &output)
             }
         }
     }
@@ -474,6 +671,110 @@ public enum ClickHouseBlockWriter {
         for row in values {
             writeArrayElements(row, element: valueElement, into: &output)
         }
+    }
+
+    // Array(Tuple(T0, ..., Tn)) wire body: cumulative per-row element offsets
+    // (shared across all tuple fields, taken from the first field's per-row
+    // counts), then each tuple field's flattened element column emitted in
+    // declaration order. For a 2-field tuple this is byte-identical to a Map(K, V)
+    // body, which is how a 2-field Array(Tuple) was always serialized.
+    private static func writeArrayOfTuple(elementValues: [[[[UInt8]]]], elements: [ClickHouseArrayElementType], into output: inout [UInt8]) {
+        if elementValues.isEmpty { return }
+        var cumulative: UInt64 = 0
+        for row in elementValues[0] {
+            cumulative += UInt64(row.count)
+            ClickHouseWire.writeFixedInt(cumulative, into: &output)
+        }
+        for index in elements.indices {
+            for row in elementValues[index] {
+                writeArrayElements(row, element: elements[index], into: &output)
+            }
+        }
+    }
+
+    // Map(K, Array(V)) wire body: cumulative per-row entry offsets, the flattened
+    // keys (a K column over every entry), then the values as an Array(V) column
+    // over the same entries — its own per-entry offsets followed by the flattened
+    // elements, emitted by writeArray.
+    private static func writeMapWithArrayValues(keys: [[[UInt8]]], values: [[[[UInt8]]]], keyElement: ClickHouseArrayElementType, valueElement: ClickHouseArrayElementType, into output: inout [UInt8]) {
+        var cumulative: UInt64 = 0
+        for row in keys {
+            cumulative += UInt64(row.count)
+            ClickHouseWire.writeFixedInt(cumulative, into: &output)
+        }
+        for row in keys {
+            writeArrayElements(row, element: keyElement, into: &output)
+        }
+        let flatValueArrays = values.flatMap { $0 }
+        writeArray(flatValueArrays, element: valueElement, into: &output)
+    }
+
+    // Map(K, Nullable(V)) wire body: cumulative per-row offsets, the flattened
+    // keys (a K column), then the flattened values as a Nullable(V) column — a
+    // totalElements null mask followed by totalElements V values (a NULL slot
+    // carries the type placeholder, emitted by writeArrayElements for []).
+    private static func writeMapWithNullableValues(keys: [[[UInt8]]], values: [[ClickHouseNullable<[UInt8]>]], keyElement: ClickHouseArrayElementType, valueElement: ClickHouseArrayElementType, into output: inout [UInt8]) {
+        var cumulative: UInt64 = 0
+        for row in keys {
+            cumulative += UInt64(row.count)
+            ClickHouseWire.writeFixedInt(cumulative, into: &output)
+        }
+        for row in keys {
+            writeArrayElements(row, element: keyElement, into: &output)
+        }
+        let flatValues = values.flatMap { $0 }
+        for entry in flatValues {
+            output.append(entry.isAbsent ? 1 : 0)
+        }
+        let valueBytes: [[UInt8]] = flatValues.map { entry in
+            switch entry {
+            case .present(let bytes): bytes
+            case .absent: []
+            }
+        }
+        writeArrayElements(valueBytes, element: valueElement, into: &output)
+    }
+
+    // Array(Array(T)) wire body: rowCount outer offsets (cumulative inner-array
+    // counts per row), then totalOuter inner offsets (cumulative element counts
+    // per inner array), then the flattened innermost elements.
+    private static func writeNestedArray(perRow: [[[[UInt8]]]], element: ClickHouseArrayElementType, into output: inout [UInt8]) {
+        var cumulativeOuter: UInt64 = 0
+        for row in perRow {
+            cumulativeOuter += UInt64(row.count)
+            ClickHouseWire.writeFixedInt(cumulativeOuter, into: &output)
+        }
+        let innerArrays = perRow.flatMap { $0 }
+        var cumulativeInner: UInt64 = 0
+        for innerArray in innerArrays {
+            cumulativeInner += UInt64(innerArray.count)
+            ClickHouseWire.writeFixedInt(cumulativeInner, into: &output)
+        }
+        writeArrayElements(innerArrays.flatMap { $0 }, element: element, into: &output)
+    }
+
+    // Array(Nullable(T)) wire body: cumulative per-row offsets, then the inner
+    // column as Nullable(T) — a totalElements null mask (1 = NULL) followed by
+    // totalElements inner values. A NULL slot carries the type's placeholder
+    // (empty bytes, which writeArrayElements emits as a zero-length string for
+    // variable widths or zero-padded bytes for fixed widths).
+    private static func writeArrayOfNullable(perRow: [[ClickHouseNullable<[UInt8]>]], element: ClickHouseArrayElementType, into output: inout [UInt8]) {
+        var cumulative: UInt64 = 0
+        for row in perRow {
+            cumulative += UInt64(row.count)
+            ClickHouseWire.writeFixedInt(cumulative, into: &output)
+        }
+        let flat = perRow.flatMap { $0 }
+        for entry in flat {
+            output.append(entry.isAbsent ? 1 : 0)
+        }
+        let valueBytes: [[UInt8]] = flat.map { entry in
+            switch entry {
+            case .present(let bytes): bytes
+            case .absent: []
+            }
+        }
+        writeArrayElements(valueBytes, element: element, into: &output)
     }
 
     // Variant body: 8-byte basic-discriminators mode prefix (0), then one

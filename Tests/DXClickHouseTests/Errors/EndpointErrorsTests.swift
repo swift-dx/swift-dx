@@ -106,7 +106,7 @@ struct ClickHouseEndpointErrorsTests {
         case .allEndpointsFailed(let failures):
             #expect(failures.count >= 1)
             #expect(failures.allSatisfy { $0.host == "127.0.0.1" })
-        case .poolClosed, .acquireTimedOut:
+        case .poolClosed, .acquireTimedOut, .invalidConfiguration:
             Issue.record("unexpected failure: \(failure)")
         }
     }
@@ -151,6 +151,7 @@ struct ClickHouseEndpointErrorsTests {
             .acquireTimedOut(after: .milliseconds(500)),
             .openFailed(reason: "ECONNREFUSED"),
             .allEndpointsFailed(failures: [ClickHouseEndpointFailure(host: "h", port: 1, reason: "x")]),
+            .invalidConfiguration(reason: "maxConnections must be >= 1"),
         ]
         var observed: [String] = []
         for failure in samples {
@@ -163,11 +164,14 @@ struct ClickHouseEndpointErrorsTests {
                 observed.append("open:\(reason)")
             case .allEndpointsFailed(let failures):
                 observed.append("all:\(failures.count)")
+            case .invalidConfiguration(let reason):
+                observed.append("invalid:\(reason)")
             }
         }
-        #expect(observed.count == 4)
+        #expect(observed.count == 5)
         #expect(observed[0] == "closed")
         #expect(observed[2] == "open:ECONNREFUSED")
         #expect(observed[3] == "all:1")
+        #expect(observed[4] == "invalid:maxConnections must be >= 1")
     }
 }

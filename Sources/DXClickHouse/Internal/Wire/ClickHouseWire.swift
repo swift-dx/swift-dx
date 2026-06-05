@@ -125,7 +125,13 @@ public enum ClickHouseWire {
 
     @inlinable
     public static func writeString(_ value: String, into output: inout [UInt8]) {
-        let utf8 = Array(value.utf8)
+        // Append the string's UTF-8 view directly. Materializing an
+        // intermediate `Array(value.utf8)` would heap-allocate and copy
+        // once per string; on a string-heavy INSERT body that doubles the
+        // serialization cost. `utf8.count` is O(1) for native strings and
+        // `append(contentsOf:)` fast-paths to a single bulk copy via the
+        // view's contiguous storage.
+        let utf8 = value.utf8
         writeUVarInt(UInt64(utf8.count), into: &output)
         output.append(contentsOf: utf8)
     }

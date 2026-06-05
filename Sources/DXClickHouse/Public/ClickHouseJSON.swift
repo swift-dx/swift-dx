@@ -35,6 +35,28 @@ public struct ClickHouseJSON: Sendable, Hashable, Codable {
         self.bytes = Array(text.utf8)
     }
 
+    // Encodes any Codable value to JSON text via Foundation's JSONEncoder,
+    // for the common case of a JSON-payload column carrying a Swift value.
+    // A Foundation encoding failure surfaces as a typed ClickHouseError.
+    public init<Value: Encodable>(encoding value: Value) throws(ClickHouseError) {
+        do {
+            self.bytes = Array(try JSONEncoder().encode(value))
+        } catch {
+            throw .protocolError(stage: "json.encode", message: "\(error)")
+        }
+    }
+
+    // Decodes the stored JSON text into a Codable value via Foundation's
+    // JSONDecoder. Malformed JSON or a type mismatch surfaces as a typed
+    // ClickHouseError rather than an untyped Foundation DecodingError.
+    public func decode<Value: Decodable>(_ type: Value.Type) throws(ClickHouseError) -> Value {
+        do {
+            return try JSONDecoder().decode(Value.self, from: Data(bytes))
+        } catch {
+            throw .protocolError(stage: "json.decode", message: "\(error)")
+        }
+    }
+
     public var text: String {
         String(decoding: bytes, as: UTF8.self)
     }

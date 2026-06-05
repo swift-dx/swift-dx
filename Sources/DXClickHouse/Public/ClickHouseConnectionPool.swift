@@ -143,6 +143,7 @@ public actor ClickHouseConnectionPool {
         case acquireTimedOut(after: Duration)
         case openFailed(reason: String)
         case allEndpointsFailed(failures: [ClickHouseEndpointFailure])
+        case invalidConfiguration(reason: String)
 
         public var description: String {
             switch self {
@@ -151,6 +152,7 @@ public actor ClickHouseConnectionPool {
             case .openFailed(let reason): "failed to open underlying connection: \(reason)"
             case .allEndpointsFailed(let failures):
                 "every endpoint failed: \(failures.map { $0.description }.joined(separator: "; "))"
+            case .invalidConfiguration(let reason): "invalid pool configuration: \(reason)"
             }
         }
     }
@@ -240,10 +242,7 @@ public actor ClickHouseConnectionPool {
     }
 
     public init(configuration: Configuration) async throws(Failure) {
-        precondition(configuration.minConnections >= 0, "minConnections must be >= 0")
-        precondition(configuration.maxConnections >= 1, "maxConnections must be >= 1")
-        precondition(configuration.minConnections <= configuration.maxConnections, "minConnections must be <= maxConnections")
-        precondition(!configuration.endpoints.isEmpty, "at least one endpoint must be supplied")
+        try Self.validate(configuration)
         self.configuration = configuration
         let seedTarget = min(configuration.minConnections, configuration.maxConnections)
         idle.reserveCapacity(configuration.maxConnections)
@@ -257,6 +256,23 @@ public actor ClickHouseConnectionPool {
         self.openedTotal = prewarm.entries.count
         self.endpointFailovers = prewarm.failovers
         self.startEvictionTask()
+    }
+
+    // Reject a structurally-invalid pool configuration with a typed
+    // error at construction instead of trapping the process. A server
+    // aiming for high availability must not crash because a max-pool-size
+    // was computed to zero or a min/max pair was inverted; the caller
+    // gets `Failure.invalidConfiguration` and decides how to recover.
+    private static func validate(_ configuration: Configuration) throws(Failure) {
+        let checks: [(passes: Bool, reason: String)] = [
+            (configuration.maxConnections >= 1, "maxConnections must be >= 1, got \(configuration.maxConnections)"),
+            (configuration.minConnections >= 0, "minConnections must be >= 0, got \(configuration.minConnections)"),
+            (configuration.minConnections <= configuration.maxConnections, "minConnections (\(configuration.minConnections)) must be <= maxConnections (\(configuration.maxConnections))"),
+            (!configuration.endpoints.isEmpty, "at least one endpoint must be supplied"),
+        ]
+        for check in checks where !check.passes {
+            throw Failure.invalidConfiguration(reason: check.reason)
+        }
     }
 
     private struct PrewarmResult {
@@ -329,8 +345,70 @@ public actor ClickHouseConnectionPool {
             release(entry)
             return value
         } catch {
-            release(entry)
+            await discardIfBroken(entry, after: error)
             throw error
+        }
+    }
+
+    // A lease that ends in failure must not blindly recycle the connection.
+    // If the failure left the socket broken or the protocol stream desynced,
+    // returning it to the idle stack — or handing it straight to a waiting
+    // caller — would pass the damage to the next lease. Only a clean
+    // server-side query rejection leaves the connection reusable.
+    private func discardIfBroken(_ entry: PooledConnection, after error: any Error) async {
+        if connectionSurvives(error) {
+            release(entry)
+        } else {
+            await discardBrokenConnection(entry)
+        }
+    }
+
+    private func connectionSurvives(_ error: any Error) -> Bool {
+        guard let typed = error as? ClickHouseError else { return true }
+        return Self.connectionIsCleanAfter(typed)
+    }
+
+    private static func connectionIsCleanAfter(_ error: ClickHouseError) -> Bool {
+        switch error {
+        case .queryFailed:
+            return true
+        case .connectionFailed, .socketIOFailed, .unexpectedEOF, .protocolError,
+             .reconnectExhausted, .endpointsExhausted, .queryTimeout:
+            return false
+        }
+    }
+
+    private func discardBrokenConnection(_ entry: PooledConnection) async {
+        inUseCount -= 1
+        leasesReleased += 1
+        await entry.connection.close()
+        closedTotal += 1
+        if isShutdown { return }
+        await serveWaiterWithFreshConnection()
+    }
+
+    // Discarding a broken connection frees a capacity slot but, unlike
+    // release(), wakes no parked waiter. Open a replacement for the next
+    // waiter so it is not left blocked until its acquire timeout.
+    private func serveWaiterWithFreshConnection() async {
+        guard canServeNewWaiter else { return }
+        let waiter = waiters.removeFirst()
+        await openAndHand(to: waiter)
+    }
+
+    private var canServeNewWaiter: Bool {
+        !waiters.isEmpty && (inUseCount + idle.count) < configuration.maxConnections
+    }
+
+    private func openAndHand(to waiter: Waiter) async {
+        inUseCount += 1
+        do {
+            let entry = try await openWithFailover()
+            openedTotal += 1
+            waiter.resume(returning: entry)
+        } catch {
+            inUseCount -= 1
+            waiter.resume(throwing: error)
         }
     }
 
@@ -472,7 +550,7 @@ public actor ClickHouseConnectionPool {
 
     private func preflight(connection: AsyncClickHouseConnection) async -> Bool {
         do {
-            try await connection.ping()
+            try await connection.pingOnce()
             return true
         } catch {
             return false
@@ -511,9 +589,13 @@ public actor ClickHouseConnectionPool {
             await self?.timeoutWaiter(token: token)
         }
         do {
-            let entry = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<PooledConnection, Error>) in
-                let waiter = Waiter(token: token, continuation: continuation)
-                waiters.append(waiter)
+            let entry = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<PooledConnection, Error>) in
+                    let waiter = Waiter(token: token, continuation: continuation)
+                    waiters.append(waiter)
+                }
+            } onCancel: {
+                Task { [weak self] in await self?.cancelWaiter(token: token) }
             }
             timeoutTask.cancel()
             leasesGranted += 1
@@ -529,6 +611,17 @@ public actor ClickHouseConnectionPool {
         let waiter = waiters.remove(at: waiterIndex)
         acquireTimeouts += 1
         waiter.resume(throwing: Failure.acquireTimedOut(after: configuration.acquireTimeout))
+    }
+
+    // Resumes a parked waiter with CancellationError when the acquiring
+    // task is cancelled, so a request that gives up no longer blocks until
+    // the acquire timeout fires. The Waiter's resume guard makes this safe
+    // against a concurrent release() or timeout that already resumed it;
+    // if so, the waiter is gone from the queue and this is a no-op.
+    private func cancelWaiter(token: Int) {
+        guard let waiterIndex = waiters.firstIndex(where: { $0.token == token }) else { return }
+        let waiter = waiters.remove(at: waiterIndex)
+        waiter.resume(throwing: CancellationError())
     }
 
     private func release(_ entry: PooledConnection) {

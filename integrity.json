@@ -147,6 +147,13 @@
       "reason": "Foundation's KeyedDecodingContainerProtocol mandates decodeIfPresent(_:forKey:) -> T? returns for every primitive plus the generic Decodable overload. The generic decode<T: Decodable>(_ type: T.Type, forKey:) -> T overload performs runtime type-equality dispatch where 'as! T' is the only Swift surface that can convert the typed result back to the generic parameter. The dispatch switch over Swift primitive types (Bool, String, Date, UUID, 10 integer widths) gives cyclomatic complexity 15 and cannot be reduced without abandoning the Codable contract."
     },
     {
+      "path": "Sources/DXClickHouse/Internal/Codable/ClickHouseArrayOfTupleDecoder.swift",
+      "rules": [
+        "S002"
+      ],
+      "reason": "Foundation's UnkeyedDecodingContainer protocol mandates var count: Int? as a member. The Optional is required by the third-party Codable contract; the container always returns a concrete element count and never surfaces nil on the public API."
+    },
+    {
       "path": "Sources/DXClickHouse/Internal/Codable/ClickHouseRowKeyedContainer.swift",
       "rules": [
         "S002",

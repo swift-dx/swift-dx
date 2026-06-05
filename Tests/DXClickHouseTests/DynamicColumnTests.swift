@@ -20,6 +20,20 @@ struct ClickHouseDynamicColumnTests {
         let value: ClickHouseDynamic
     }
 
+    @Test("decode rejects an out-of-range Dynamic discriminator instead of trapping")
+    func rejectsOutOfRangeDynamicDiscriminator() {
+        let columns: [ClickHouseNamedColumn] = [
+            ClickHouseNamedColumn(name: "value", column: .dynamic(members: [.string, .uint64], discriminators: [9], values: [[]])),
+        ]
+        var stage = "none"
+        do {
+            _ = try ClickHouseCodableDecoder.decodeRows(type: Row.self, columns: columns, rowCount: 1)
+        } catch {
+            if case .protocolError(let caught, _) = error { stage = caught }
+        }
+        #expect(stage == "decoder.dynamic")
+    }
+
     @Test("Dynamic writes structure prefix, member names, then the embedded Variant body")
     func encodeDynamicBytes() throws {
         let columns = try ClickHouseRowEncoder().encode([

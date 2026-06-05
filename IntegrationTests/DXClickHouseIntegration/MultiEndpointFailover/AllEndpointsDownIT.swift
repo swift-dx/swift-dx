@@ -65,7 +65,7 @@ struct AllEndpointsDownIT {
                 // failures, accept either as long as the surface is
                 // typed.
                 break
-            case .poolClosed, .acquireTimedOut:
+            case .poolClosed, .acquireTimedOut, .invalidConfiguration:
                 Issue.record("unexpected typed pool failure: \(caught)")
             }
         }
@@ -107,7 +107,7 @@ struct AllEndpointsDownIT {
                 #expect(failures.count >= 1)
             case .openFailed:
                 break
-            case .poolClosed, .acquireTimedOut:
+            case .poolClosed, .acquireTimedOut, .invalidConfiguration:
                 Issue.record("unexpected typed pool failure: \(caught)")
             }
         }

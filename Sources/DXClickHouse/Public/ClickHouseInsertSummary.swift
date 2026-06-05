@@ -12,8 +12,8 @@
 // Returned to callers of the typed INSERT path so they can observe the
 // exact number of rows the server reported back via its Progress
 // packets, plus the number of blocks the client serialised and sent.
-// Cumulative writtenRows is taken from the last Progress packet emitted
-// before EndOfStream.
+// writtenRows and writtenBytes are the sum of the per-packet increments
+// the server reported across every Progress packet up to EndOfStream.
 public struct ClickHouseInsertSummary: Sendable, Equatable {
 
     public let rowsSent: Int
@@ -26,5 +26,16 @@ public struct ClickHouseInsertSummary: Sendable, Equatable {
         self.blocksSent = blocksSent
         self.writtenRows = writtenRows
         self.writtenBytes = writtenBytes
+    }
+
+    // Combines this summary with another, used when a streamed INSERT is
+    // sent as several batched INSERTs and their counts must be totalled.
+    package func adding(_ other: ClickHouseInsertSummary) -> ClickHouseInsertSummary {
+        ClickHouseInsertSummary(
+            rowsSent: rowsSent + other.rowsSent,
+            blocksSent: blocksSent + other.blocksSent,
+            writtenRows: writtenRows + other.writtenRows,
+            writtenBytes: writtenBytes + other.writtenBytes
+        )
     }
 }

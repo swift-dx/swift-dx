@@ -232,7 +232,7 @@ struct ClickHouseFaultInjectionTests {
                 elapsedMicroseconds >= 400_000 && elapsedMicroseconds <= 5_000_000,
                 "acquireTimedOut fired at \(elapsedMicroseconds)us; expected 400ms..5s window"
             )
-        case .poolClosed, .openFailed, .allEndpointsFailed:
+        case .poolClosed, .openFailed, .allEndpointsFailed, .invalidConfiguration:
             Issue.record("unexpected typed failure for pool exhaustion: \(failure)")
         }
 

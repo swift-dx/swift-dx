@@ -52,19 +52,20 @@ enum ClickHouseTupleColumnBuilder {
         return values
     }
 
-    static func elementTypes(of columns: [ClickHouseTypedColumn]) -> [ClickHouseArrayElementType] {
+    static func elementTypes(of columns: [ClickHouseTypedColumn]) throws(ClickHouseError) -> [ClickHouseArrayElementType] {
         var types: [ClickHouseArrayElementType] = []
         types.reserveCapacity(columns.count)
         for column in columns {
-            types.append(elementType(of: column))
+            types.append(try elementType(of: column))
         }
         return types
     }
 
     private static func column(of element: ClickHouseArrayElementType, rawValues: [[UInt8]]) -> ClickHouseTypedColumn {
         switch element {
-        case .string: return .string(rawValues.map { String(decoding: $0, as: UTF8.self) })
+        case .string: return .string(rawValues)
         case .fixedString(let length): return .fixedString(rawValues, length: length)
+        case .bool: return .bool(rawValues.map { scalarByte($0) != 0 })
         case .int8: return .int8(rawValues.map { Int8(bitPattern: scalarByte($0)) })
         case .uint8: return .uint8(rawValues.map { scalarByte($0) })
         case .int16: return .int16(rawValues.map { Int16(bitPattern: scalar($0)) })
@@ -75,13 +76,28 @@ enum ClickHouseTupleColumnBuilder {
         case .uint64: return .uint64(rawValues.map { scalar($0) })
         case .float32: return .float32(rawValues.map { Float(bitPattern: scalar($0)) })
         case .float64: return .float64(rawValues.map { Double(bitPattern: scalar($0)) })
+        case .dateTime: return .dateTime(rawValues.map { Date(timeIntervalSince1970: TimeInterval(scalar($0) as UInt32)) })
+        case .date: return .date(rawValues.map { scalar($0) as UInt16 })
+        case .date32: return .date32(rawValues.map { Int32(bitPattern: scalar($0)) })
+        case .dateTime64(let precision): return .dateTime64(rawValues.map { Int64(bitPattern: scalar($0)) }, precision: precision)
+        case .decimal(let precision, let scale): return .decimal(rawValues.map { ClickHouseDecimal(littleEndianBytes: $0, precision: precision, scale: scale) }, precision: precision, scale: scale)
+        case .enum8(let mapping): return .enum8(rawValues.map { Int8(bitPattern: scalarByte($0)) }, mapping: mapping)
+        case .enum16(let mapping): return .enum16(rawValues.map { Int16(bitPattern: scalar($0)) }, mapping: mapping)
+        case .uuid: return .uuid(rawValues.map { ClickHouseUUIDWire.uuid(fromWire: $0) })
+        case .ipv4: return .ipv4(rawValues.map { scalar($0) })
+        case .ipv6: return .ipv6(rawValues)
+        case .int128: return .int128(rawValues.map { scalar($0) })
+        case .uint128: return .uint128(rawValues.map { scalar($0) })
+        case .int256: return .int256(rawValues.map { ClickHouseInt256(littleEndianBytes: $0) })
+        case .uint256: return .uint256(rawValues.map { ClickHouseUInt256(littleEndianBytes: $0) })
         }
     }
 
     private static func rawValue(of column: ClickHouseTypedColumn, rowIndex: Int) -> [UInt8] {
         switch column {
-        case .string(let values): return Array(values[rowIndex].utf8)
+        case .string(let values): return values[rowIndex]
         case .fixedString(let values, _): return values[rowIndex]
+        case .bool(let values): return [values[rowIndex] ? 1 : 0]
         case .int8(let values): return [UInt8(bitPattern: values[rowIndex])]
         case .uint8(let values): return [values[rowIndex]]
         case .int16(let values): return littleEndianBytes(UInt16(bitPattern: values[rowIndex]))
@@ -96,10 +112,11 @@ enum ClickHouseTupleColumnBuilder {
         }
     }
 
-    private static func elementType(of column: ClickHouseTypedColumn) -> ClickHouseArrayElementType {
+    private static func elementType(of column: ClickHouseTypedColumn) throws(ClickHouseError) -> ClickHouseArrayElementType {
         switch column {
         case .string: return .string
         case .fixedString(_, let length): return .fixedString(length: length)
+        case .bool: return .bool
         case .int8: return .int8
         case .uint8: return .uint8
         case .int16: return .int16
@@ -110,7 +127,8 @@ enum ClickHouseTupleColumnBuilder {
         case .uint64: return .uint64
         case .float32: return .float32
         case .float64: return .float64
-        default: return .string
+        default:
+            throw .protocolError(stage: "decoder.tuple", message: "Tuple contains an element type ClickHouseTuple cannot represent (supported: String, FixedString, Bool, Int8/16/32/64, UInt8/16/32/64, Float32, Float64); select the tuple elements as separate columns")
         }
     }
 

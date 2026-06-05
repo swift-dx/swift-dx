@@ -28,10 +28,10 @@ import Foundation
 
 extension ClickHouseClient {
 
-    public nonisolated func execute(_ sql: String, settings: ClickHouseQuerySettings = .empty, completion: @escaping DXCallback<Void, ClickHouseError>) {
+    public nonisolated func execute(_ sql: String, settings: ClickHouseQuerySettings = .empty, parameters: ClickHouseQueryParameters = .empty, completion: @escaping DXCallback<Void, ClickHouseError>) {
         Task { [self] in
             do {
-                try await self.execute(sql, settings: settings)
+                try await self.execute(sql, settings: settings, parameters: parameters)
                 completion(.success(()))
             } catch let error as ClickHouseError {
                 completion(.failure(error))
@@ -58,11 +58,12 @@ extension ClickHouseClient {
         _ sql: String,
         as type: T.Type,
         settings: ClickHouseQuerySettings = .empty,
+        parameters: ClickHouseQueryParameters = .empty,
         completion: @escaping DXCallback<T, ClickHouseError>
     ) {
         Task { [self] in
             do {
-                let value = try await self.scalar(sql, as: type, settings: settings)
+                let value = try await self.scalar(sql, as: type, settings: settings, parameters: parameters)
                 completion(.success(value))
             } catch let error as ClickHouseError {
                 completion(.failure(error))
@@ -108,14 +109,57 @@ extension ClickHouseClient {
         try await insert(into: table, rows: Array(rows), timeout: timeout, settings: settings)
     }
 
+    // Streams the source into the destination, draining it in batches of at
+    // most `batchSize` rows and sending each batch as its own INSERT. This
+    // keeps memory bounded by the batch — a large or unbounded source no
+    // longer materialises in full — at the cost of one INSERT per batch
+    // rather than a single atomic INSERT (which an unbounded stream cannot
+    // be regardless).
     public func insert<Source: AsyncSequence & Sendable, Row: Encodable & Sendable>(
         into table: String,
         rows: Source,
+        batchSize: Int = 65_536,
         timeout: Duration = ClickHouseQueryDefaults.insertTimeout,
         settings: ClickHouseQuerySettings = .empty
     ) async throws(ClickHouseError) -> ClickHouseInsertSummary where Source.Element == Row {
-        let collected: [Row] = try await Self.materialise(rows: rows)
-        return try await insert(into: table, rows: collected, timeout: timeout, settings: settings)
+        var summary = ClickHouseInsertSummary(rowsSent: 0, blocksSent: 0, writtenRows: 0, writtenBytes: 0)
+        var batch: [Row] = []
+        batch.reserveCapacity(Swift.min(batchSize, 4_096))
+        var iterator = rows.makeAsyncIterator()
+        while case .row(let row) = try await Self.nextRow(&iterator) {
+            batch.append(row)
+            if batch.count >= batchSize {
+                summary = summary.adding(try await insert(into: table, rows: batch, timeout: timeout, settings: settings))
+                batch.removeAll(keepingCapacity: true)
+            }
+        }
+        return try await flushBatch(batch, into: table, summary: summary, timeout: timeout, settings: settings)
+    }
+
+    private func flushBatch<Row: Encodable & Sendable>(
+        _ batch: [Row],
+        into table: String,
+        summary: ClickHouseInsertSummary,
+        timeout: Duration,
+        settings: ClickHouseQuerySettings
+    ) async throws(ClickHouseError) -> ClickHouseInsertSummary {
+        guard !batch.isEmpty else { return summary }
+        return summary.adding(try await insert(into: table, rows: batch, timeout: timeout, settings: settings))
+    }
+
+    // Reads one element, converting the source's untyped failure into the
+    // library's typed error. A two-case result rather than an Optional keeps
+    // the surrounding INSERT typed without a catch-downcast, and avoids an
+    // Optional return type.
+    private static func nextRow<Iterator: AsyncIteratorProtocol>(_ iterator: inout Iterator) async throws(ClickHouseError) -> StreamedRow<Iterator.Element> {
+        do {
+            if let row = try await iterator.next() {
+                return .row(row)
+            }
+            return .end
+        } catch {
+            throw ClickHouseError.protocolError(stage: "insert.asyncSequence", message: "\(error)")
+        }
     }
 
     public nonisolated func insert<T: Encodable & Sendable>(
@@ -138,18 +182,6 @@ extension ClickHouseClient {
 
     static func decodeSQL(_ bytes: [UInt8]) -> String {
         String(decoding: bytes, as: Unicode.UTF8.self)
-    }
-
-    static func materialise<Source: AsyncSequence & Sendable, Row: Encodable & Sendable>(
-        rows: Source
-    ) async throws(ClickHouseError) -> [Row] where Source.Element == Row {
-        var collected: [Row] = []
-        do {
-            for try await row in rows { collected.append(row) }
-        } catch {
-            throw .protocolError(stage: "insert.asyncSequence", message: "\(error)")
-        }
-        return collected
     }
 
     nonisolated func runOnTransportReturning<Value: Sendable>(
@@ -185,4 +217,12 @@ extension ClickHouseClient {
             return .failure(error)
         }
     }
+}
+
+// One drained element of a streamed INSERT source, or the end of the
+// stream. A typed result rather than an Optional, so the streaming INSERT
+// can pattern-match without an Optional crossing the boundary.
+private enum StreamedRow<Element> {
+    case row(Element)
+    case end
 }

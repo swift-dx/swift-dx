@@ -31,4 +31,21 @@ public struct ClickHouseInt256: Sendable, Hashable, Codable {
         let extension64: UInt64 = value < 0 ? .max : 0
         self.init(limb0: UInt64(bitPattern: value), limb1: extension64, limb2: extension64, limb3: extension64)
     }
+
+    package init(littleEndianBytes bytes: [UInt8]) {
+        let limbs = ClickHouseWideIntegerWire.limbs(fromLittleEndianBytes: bytes)
+        self.init(limb0: limbs.0, limb1: limbs.1, limb2: limbs.2, limb3: limbs.3)
+    }
+
+    package var littleEndianBytes: [UInt8] {
+        ClickHouseWideIntegerWire.littleEndianBytes(limb0: limb0, limb1: limb1, limb2: limb2, limb3: limb3)
+    }
+}
+
+extension ClickHouseInt256: CustomStringConvertible {
+
+    public var description: String {
+        let (negative, digits) = ClickHouseWideDecimal.signedDigits((limb0, limb1, limb2, limb3))
+        return negative ? "-" + digits : digits
+    }
 }

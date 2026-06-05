@@ -19,3 +19,10 @@ public struct ClickHouseInt128: Sendable, Hashable, Codable {
         self.value = value
     }
 }
+
+extension ClickHouseInt128: CustomStringConvertible {
+
+    public var description: String {
+        value.description
+    }
+}

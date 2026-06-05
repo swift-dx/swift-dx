@@ -45,49 +45,11 @@ enum ClickHouseTupleTypeSplitter {
     }
 
     private static func splitTopLevel(_ inner: String, typeName: String) throws(ClickHouseError) -> [String] {
-        var scanner = TopLevelScanner()
-        for character in inner {
-            scanner.consume(character)
-        }
-        if scanner.depth != 0 {
+        let result = ClickHouseTypeArgumentSplitter.topLevel(inner)
+        guard result.balanced else {
             throw .protocolError(stage: "decoder.tuple", message: "unbalanced parentheses in \(typeName)")
         }
-        return scanner.finished()
-    }
-
-    private struct TopLevelScanner {
-
-        private(set) var depth = 0
-        private var segments: [String] = []
-        private var current: [Character] = []
-
-        mutating func consume(_ character: Character) {
-            depth += depthDelta(character)
-            if character == "," && depth == 0 {
-                flush()
-                return
-            }
-            current.append(character)
-        }
-
-        mutating func finished() -> [String] {
-            flush()
-            return segments
-        }
-
-        private mutating func flush() {
-            segments.append(String(current))
-            current.removeAll(keepingCapacity: true)
-        }
-    }
-
-    private static let openBrackets: Set<Character> = ["(", "["]
-    private static let closeBrackets: Set<Character> = [")", "]"]
-
-    private static func depthDelta(_ character: Character) -> Int {
-        if openBrackets.contains(character) { return 1 }
-        if closeBrackets.contains(character) { return -1 }
-        return 0
+        return result.segments
     }
 
     private static func separateNameAndType(_ segment: String) -> Element {

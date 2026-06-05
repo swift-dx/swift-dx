@@ -60,20 +60,22 @@ struct ClickHouseExhaustiveSwitchTests {
             .acquireTimedOut(after: .milliseconds(500)),
             .openFailed(reason: "x"),
             .allEndpointsFailed(failures: []),
+            .invalidConfiguration(reason: "y"),
         ]
-        #expect(samples.count == 4)
+        #expect(samples.count == 5)
         var hits = Set<String>()
         for failure in samples {
             let label: String
             switch failure {
-            case .poolClosed:          label = "poolClosed"
-            case .acquireTimedOut:     label = "acquireTimedOut"
-            case .openFailed:          label = "openFailed"
-            case .allEndpointsFailed:  label = "allEndpointsFailed"
+            case .poolClosed:            label = "poolClosed"
+            case .acquireTimedOut:       label = "acquireTimedOut"
+            case .openFailed:            label = "openFailed"
+            case .allEndpointsFailed:    label = "allEndpointsFailed"
+            case .invalidConfiguration:  label = "invalidConfiguration"
             }
             hits.insert(label)
         }
-        #expect(hits.count == 4)
+        #expect(hits.count == 5)
     }
 
     @Test("Exhaustive switch round-trips every ClickHouseError payload")

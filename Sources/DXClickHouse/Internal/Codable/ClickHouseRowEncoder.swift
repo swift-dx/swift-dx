@@ -31,13 +31,14 @@ import Foundation
 // subsequent row must produce the same column set with matching types.
 // Type conflicts surface as `.encoderColumnTypeMismatch`; row N missing
 // columns that row 0 declared surfaces as `.encoderRowMissingColumns`.
-public final class ClickHouseRowEncoder: Sendable {
+package final class ClickHouseRowEncoder: Sendable {
 
-    public init() {}
+    package init() {}
 
-    public func encode<T: Encodable & Sendable>(_ rows: [T]) throws(ClickHouseError) -> [ClickHouseNamedColumn] {
+    package func encode<T: Encodable & Sendable>(_ rows: [T]) throws(ClickHouseError) -> [ClickHouseNamedColumn] {
         let storage = ClickHouseRowEncoderStorage()
         try encodeAllRows(rows, into: storage)
+        try storage.finishEncoding()
         return storage.materialize()
     }
 

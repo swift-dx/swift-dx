@@ -82,6 +82,25 @@ struct ClickHouseVariantColumnTests {
         #expect(rows[0].value.value == .string("k"))
     }
 
+    @Test("decode rejects an out-of-range Variant discriminator instead of trapping")
+    func rejectsOutOfRangeVariantDiscriminator() {
+        // Variant(String, UInt64) declares two members, so the only valid
+        // discriminators are 0, 1, or 255 (NULL). The wire reader copies
+        // discriminator bytes through verbatim, so a malformed server byte
+        // of 7 reaches the row decoder and must surface a typed error
+        // rather than trap on an out-of-bounds member lookup.
+        let columns: [ClickHouseNamedColumn] = [
+            ClickHouseNamedColumn(name: "value", column: .variant(members: [.string, .uint64], discriminators: [7], values: [[]])),
+        ]
+        var stage = "none"
+        do {
+            _ = try ClickHouseCodableDecoder.decodeRows(type: Row.self, columns: columns, rowCount: 1)
+        } catch {
+            if case .protocolError(let caught, _) = error { stage = caught }
+        }
+        #expect(stage == "decoder.variant")
+    }
+
     private static func roundTrip(rows: [Row], bodyLength: Int) throws -> [Row] {
         let columns = try ClickHouseRowEncoder().encode(rows)
         let packet = try ClickHouseBlockWriter.encodeDataPacket(

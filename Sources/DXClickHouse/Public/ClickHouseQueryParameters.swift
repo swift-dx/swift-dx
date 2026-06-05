@@ -31,11 +31,29 @@ public struct ClickHouseQueryParameters: Sendable, Equatable {
     public var count: Int { entries.count }
 
     func encode(into output: inout [UInt8], revision: UInt64) throws(ClickHouseError) {
-        guard revision >= Self.revisionWithQueryParameters else { return }
+        guard revision >= Self.revisionWithQueryParameters else {
+            try requireEmptyForUnsupportedRevision(revision: revision)
+            return
+        }
         for entry in entries {
             try emit(entry, into: &output)
         }
         ClickHouseWire.writeString("", into: &output)
+    }
+
+    // The query-parameters field does not exist on the wire before
+    // revision 54_459, so it is correct to emit nothing there. But
+    // silently emitting nothing while the caller bound parameters would
+    // leave the `{name:Type}` placeholders unresolved in the SQL and
+    // surface as an opaque server-side error. Fail loudly at the boundary
+    // instead so the caller learns the server is too old for binding.
+    private func requireEmptyForUnsupportedRevision(revision: UInt64) throws(ClickHouseError) {
+        guard entries.isEmpty else {
+            throw .protocolError(
+                stage: "parameters",
+                message: "server protocol revision \(revision) does not support query parameters (requires \(Self.revisionWithQueryParameters)); \(entries.count) bound parameter(s) would be silently dropped, leaving unresolved {name:Type} placeholders in the query"
+            )
+        }
     }
 
     private func emit(_ entry: ClickHouseQueryParameter, into output: inout [UInt8]) throws(ClickHouseError) {

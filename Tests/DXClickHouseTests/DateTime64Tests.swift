@@ -65,11 +65,46 @@ struct ClickHouseDateTime64Tests {
     }
 
     @Test("Date convenience derives ticks at the requested precision and round-trips")
-    func dateConvenience() {
-        let value = ClickHouseDateTime64(Date(timeIntervalSince1970: 1.5), precision: 3)
+    func dateConvenience() throws {
+        let value = try ClickHouseDateTime64(Date(timeIntervalSince1970: 1.5), precision: 3)
         #expect(value.ticks == 1500)
         #expect(value.precision == 3)
         #expect(ClickHouseDateTime64(ticks: 1500, precision: 3).date.timeIntervalSince1970 == 1.5)
+    }
+
+    private enum BuildOutcome: Sendable, Equatable {
+        case built
+        case rejected(stage: String)
+    }
+
+    private static func build(_ date: Date, precision: UInt8) -> BuildOutcome {
+        do {
+            _ = try ClickHouseDateTime64(date, precision: precision)
+            return .built
+        } catch {
+            if case .protocolError(let stage, _) = error { return .rejected(stage: stage) }
+            return .rejected(stage: "other")
+        }
+    }
+
+    @Test("a far-future date rejects instead of trapping on Int64 tick overflow")
+    func farFutureDateRejected() {
+        #expect(Self.build(Date(timeIntervalSince1970: 1.0e10), precision: 9) == .rejected(stage: "dateTime64"))
+    }
+
+    @Test("a far-past date rejects instead of trapping on Int64 tick overflow")
+    func farPastDateRejected() {
+        #expect(Self.build(Date(timeIntervalSince1970: -1.0e10), precision: 9) == .rejected(stage: "dateTime64"))
+    }
+
+    @Test("an out-of-range precision rejects instead of trapping on an infinite scale")
+    func invalidPrecisionRejected() {
+        #expect(Self.build(Date(timeIntervalSince1970: 1.0), precision: 200) == .rejected(stage: "dateTime64"))
+    }
+
+    @Test("an in-range date at high precision still builds")
+    func inRangeHighPrecisionBuilds() {
+        #expect(Self.build(Date(timeIntervalSince1970: 1_700_000_000), precision: 9) == .built)
     }
 
     private static func contains(_ haystack: [UInt8], _ needle: [UInt8]) -> Bool {

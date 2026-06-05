@@ -16,9 +16,9 @@ import Testing
 @Suite("ClickHouseService unit surface")
 struct ClickHouseServiceUnitTests {
 
-    @Test("Configuration requires at least one endpoint via assertion")
-    func configurationEndpointsNonEmpty() {
-        let configuration = ClickHouseConfiguration(
+    @Test("Configuration builds from a non-empty endpoints list")
+    func configurationEndpointsNonEmpty() throws {
+        let configuration = try ClickHouseConfiguration(
             endpoints: [ClickHouseEndpoint(host: "127.0.0.1", port: 9000)]
         )
         #expect(configuration.endpoints.count == 1)

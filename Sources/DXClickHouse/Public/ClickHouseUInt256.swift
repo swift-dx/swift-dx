@@ -30,4 +30,20 @@ public struct ClickHouseUInt256: Sendable, Hashable, Codable {
     public init(_ value: UInt64) {
         self.init(limb0: value, limb1: 0, limb2: 0, limb3: 0)
     }
+
+    package init(littleEndianBytes bytes: [UInt8]) {
+        let limbs = ClickHouseWideIntegerWire.limbs(fromLittleEndianBytes: bytes)
+        self.init(limb0: limbs.0, limb1: limbs.1, limb2: limbs.2, limb3: limbs.3)
+    }
+
+    package var littleEndianBytes: [UInt8] {
+        ClickHouseWideIntegerWire.littleEndianBytes(limb0: limb0, limb1: limb1, limb2: limb2, limb3: limb3)
+    }
+}
+
+extension ClickHouseUInt256: CustomStringConvertible {
+
+    public var description: String {
+        ClickHouseWideDecimal.unsignedDigits((limb0, limb1, limb2, limb3))
+    }
 }

@@ -52,13 +52,15 @@ extension ClickHouseConnection {
     }
 
     public func receiveInsertSampleSchema() throws(ClickHouseError) -> [InsertSchemaColumn] {
-        var schema: [InsertSchemaColumn] = []
-        var seenSample = false
-        while !seenSample {
-            let packetType = try readUVarIntInternal()
-            seenSample = try handleSampleSchemaPacket(packetType: packetType, schema: &schema)
+        try closingOnBrokenRead {
+            var schema: [InsertSchemaColumn] = []
+            var seenSample = false
+            while !seenSample {
+                let packetType = try readUVarIntInternal()
+                seenSample = try handleSampleSchemaPacket(packetType: packetType, schema: &schema)
+            }
+            return schema
         }
-        return schema
     }
 
     private func handleSampleSchemaPacket(
@@ -97,7 +99,14 @@ extension ClickHouseConnection {
     }
 
     public func sendRawBytes(_ bytes: [UInt8]) throws(ClickHouseError) {
-        try sendAllWithReconnectInternal(bytes)
+        try sendAllOnceInternal(bytes)
+    }
+
+    // Sends `first` immediately followed by `second` as a single contiguous
+    // write, so the two cannot land in separate segments that a partial-read
+    // peer could interleave with the next request.
+    public func sendRawBytes(_ first: [UInt8], then second: [UInt8]) throws(ClickHouseError) {
+        try sendAllVectoredInternal(first, second)
     }
 
     private enum EndOfStreamStep {
@@ -108,18 +117,20 @@ extension ClickHouseConnection {
     public func receiveEndOfStream(
         onProgress: (ClickHouseProgress) -> Void = { _ in }
     ) throws(ClickHouseError) -> (rows: UInt64, bytes: UInt64) {
-        var writtenRows: UInt64 = 0
-        var writtenBytes: UInt64 = 0
-        while true {
-            let packetType = try readUVarIntInternal()
-            let step = try handleEndOfStreamPacket(
-                packetType: packetType,
-                writtenRows: &writtenRows,
-                writtenBytes: &writtenBytes,
-                onProgress: onProgress
-            )
-            if case .finished(let rows, let bytes) = step {
-                return (rows, bytes)
+        try closingOnBrokenRead {
+            var writtenRows: UInt64 = 0
+            var writtenBytes: UInt64 = 0
+            while true {
+                let packetType = try readUVarIntInternal()
+                let step = try handleEndOfStreamPacket(
+                    packetType: packetType,
+                    writtenRows: &writtenRows,
+                    writtenBytes: &writtenBytes,
+                    onProgress: onProgress
+                )
+                if case .finished(let rows, let bytes) = step {
+                    return (rows, bytes)
+                }
             }
         }
     }
@@ -156,8 +167,13 @@ extension ClickHouseConnection {
     ) throws(ClickHouseError) {
         let progress = try readProgressPacketInternal()
         onProgress(progress)
-        writtenRows = max(writtenRows, progress.writtenRows)
-        writtenBytes = max(writtenBytes, progress.writtenBytes)
+        // ClickHouse Progress packets carry the rows/bytes written since
+        // the previous packet, not a running total, so a multi-block
+        // INSERT reports its written count across several packets. Summing
+        // is the only accumulation that yields the true total; taking the
+        // maximum would collapse to the largest single increment.
+        writtenRows += progress.writtenRows
+        writtenBytes += progress.writtenBytes
     }
 
     internal func skipDataBlockBodyInternal() throws(ClickHouseError) {

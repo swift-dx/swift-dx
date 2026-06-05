@@ -46,7 +46,7 @@ struct ClickHouseConnectionPoolFailoverTest {
             break
         case .allEndpointsFailed(let failures):
             #expect(failures.count == 2)
-        case .poolClosed, .acquireTimedOut:
+        case .poolClosed, .acquireTimedOut, .invalidConfiguration:
             Issue.record("unexpected failure: \(failure)")
         }
     }

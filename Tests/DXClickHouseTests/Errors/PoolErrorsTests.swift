@@ -94,9 +94,11 @@ struct ClickHousePoolErrorsTests {
     func acquireTimesOutWhenPoolSaturated() async throws {
         let host = ProcessInfo.processInfo.environment["CH_INTEGRATION_HOST"] ?? "localhost"
         let port = Int(ProcessInfo.processInfo.environment["CH_INTEGRATION_PORT"] ?? "9000") ?? 9000
+        let password = ProcessInfo.processInfo.environment["CH_INTEGRATION_PASSWORD"] ?? ""
         let configuration = ClickHouseConnectionPool.Configuration(
             host: host,
             port: port,
+            password: password,
             minConnections: 0,
             maxConnections: 1,
             acquireTimeout: .milliseconds(150)
@@ -141,7 +143,8 @@ struct ClickHousePoolErrorsTests {
     func acquireAfterCloseSurfacesPoolClosed() async throws {
         let host = ProcessInfo.processInfo.environment["CH_INTEGRATION_HOST"] ?? "localhost"
         let port = Int(ProcessInfo.processInfo.environment["CH_INTEGRATION_PORT"] ?? "9000") ?? 9000
-        let pool = try await ClickHouseConnectionPool(host: host, port: port, minConnections: 0, maxConnections: 2)
+        let password = ProcessInfo.processInfo.environment["CH_INTEGRATION_PASSWORD"] ?? ""
+        let pool = try await ClickHouseConnectionPool(host: host, port: port, password: password, minConnections: 0, maxConnections: 2)
         await pool.close()
 
         var caught: ClickHouseConnectionPool.Failure?
@@ -168,9 +171,11 @@ struct ClickHousePoolErrorsTests {
     func closeResumesPendingWaiters() async throws {
         let host = ProcessInfo.processInfo.environment["CH_INTEGRATION_HOST"] ?? "localhost"
         let port = Int(ProcessInfo.processInfo.environment["CH_INTEGRATION_PORT"] ?? "9000") ?? 9000
+        let password = ProcessInfo.processInfo.environment["CH_INTEGRATION_PASSWORD"] ?? ""
         let configuration = ClickHouseConnectionPool.Configuration(
             host: host,
             port: port,
+            password: password,
             minConnections: 0,
             maxConnections: 1,
             acquireTimeout: .seconds(30)

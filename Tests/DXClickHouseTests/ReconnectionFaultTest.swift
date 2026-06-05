@@ -35,6 +35,10 @@ struct ClickHouseReconnectionFaultTests {
         ProcessInfo.processInfo.environment["CH_INTEGRATION_HOST"] ?? "localhost"
     }
 
+    private static var password: String {
+        ProcessInfo.processInfo.environment["CH_INTEGRATION_PASSWORD"] ?? ""
+    }
+
     private static var port: Int {
         Int(ProcessInfo.processInfo.environment["CH_INTEGRATION_PORT"] ?? "9000") ?? 9000
     }
@@ -53,6 +57,7 @@ struct ClickHouseReconnectionFaultTests {
         let connection = try ClickHouseConnection(
             host: Self.host,
             port: Self.port,
+            password: Self.password,
             reconnectionPolicy: ReconnectionPolicy(
                 maxAttempts: 10,
                 initialBackoff: .milliseconds(200),
@@ -102,6 +107,7 @@ struct ClickHouseReconnectionFaultTests {
         let connection = try ClickHouseConnection(
             host: Self.host,
             port: Self.port,
+            password: Self.password,
             reconnectionPolicy: ReconnectionPolicy(
                 maxAttempts: 10,
                 initialBackoff: .milliseconds(200),
@@ -160,7 +166,7 @@ struct ClickHouseReconnectionFaultTests {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         while Date() < deadline {
             do {
-                let probe = try ClickHouseConnection(host: host, port: port, reconnectionPolicy: .disabled)
+                let probe = try ClickHouseConnection(host: host, port: port, password: Self.password, reconnectionPolicy: .disabled)
                 probe.close()
                 return
             } catch {

@@ -55,7 +55,7 @@ struct ClickHouseJSONColumnTests {
     @Test("decode lifts a String column body back into JSON text bytes")
     func decodeRoundTrip() throws {
         let columns: [ClickHouseNamedColumn] = [
-            ClickHouseNamedColumn(name: "payload", column: .string(["{\"a\":1}"])),
+            ClickHouseNamedColumn(name: "payload", column: .string([Array("{\"a\":1}".utf8)])),
         ]
         let rows = try ClickHouseCodableDecoder.decodeRows(type: Row.self, columns: columns, rowCount: 1)
         #expect(rows == [Row(payload: ClickHouseJSON("{\"a\":1}"))])

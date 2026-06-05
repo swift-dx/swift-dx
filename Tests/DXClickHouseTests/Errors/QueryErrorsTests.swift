@@ -112,7 +112,8 @@ struct ClickHouseQueryErrorsTests {
     func liveInvalidSqlSurfacesQueryFailed() async throws {
         let host = ProcessInfo.processInfo.environment["CH_INTEGRATION_HOST"] ?? "localhost"
         let port = Int(ProcessInfo.processInfo.environment["CH_INTEGRATION_PORT"] ?? "9000") ?? 9000
-        let client = try await ClickHouseClient(host: host, port: port)
+        let password = ProcessInfo.processInfo.environment["CH_INTEGRATION_PASSWORD"] ?? ""
+        let client = try await ClickHouseClient(host: host, port: port, password: password)
         defer { Task { await client.close() } }
 
         var caught: ClickHouseError?
@@ -139,7 +140,8 @@ struct ClickHouseQueryErrorsTests {
     func liveScalarOnBadSqlFails() async throws {
         let host = ProcessInfo.processInfo.environment["CH_INTEGRATION_HOST"] ?? "localhost"
         let port = Int(ProcessInfo.processInfo.environment["CH_INTEGRATION_PORT"] ?? "9000") ?? 9000
-        let client = try await ClickHouseClient(host: host, port: port)
+        let password = ProcessInfo.processInfo.environment["CH_INTEGRATION_PASSWORD"] ?? ""
+        let client = try await ClickHouseClient(host: host, port: port, password: password)
         defer { Task { await client.close() } }
 
         var caught: ClickHouseError?

@@ -25,9 +25,9 @@ import Foundation
 // the body is N null-mask bytes followed by N inner-type values. The
 // raw transport's existing block parser knows the column type names and
 // hands them in the block header.
-public enum ClickHouseCodableDecoder {
+package enum ClickHouseCodableDecoder {
 
-    public static func parseTypedColumns(
+    package static func parseTypedColumns(
         block: ClickHouseBlock,
         body: UnsafeRawBufferPointer
     ) throws(ClickHouseError) -> [ClickHouseNamedColumn] {
@@ -64,7 +64,7 @@ public enum ClickHouseCodableDecoder {
         return columns
     }
 
-    public static func decodeRows<T: Decodable>(
+    package static func decodeRows<T: Decodable>(
         type: T.Type,
         columns: [ClickHouseNamedColumn],
         rowCount: Int
@@ -77,6 +77,151 @@ public enum ClickHouseCodableDecoder {
             try decodeOneRow(into: &rows, type: T.self, state: state, rowIndex: rowIndex)
         }
         return rows
+    }
+
+    // Columnar fast path: bind the destination columns by name once, then
+    // build each row through the ClickHouseFastRow cursor with no per-row
+    // container allocation. Orders of magnitude faster than the Codable path
+    // for large result sets.
+    package static func decodeFastRows<T: ClickHouseRowDecodable>(
+        type: T.Type,
+        columns: [ClickHouseNamedColumn],
+        rowCount: Int
+    ) throws(ClickHouseError) -> [T] {
+        if rowCount == 0 { return [] }
+        let bound = try bindFastColumns(T.clickHouseColumnNames, to: columns)
+        return try T.decodeBlock(ClickHouseColumnBlock(columns: bound, count: rowCount))
+    }
+
+    private static func bindFastColumns(
+        _ names: [String],
+        to columns: [ClickHouseNamedColumn]
+    ) throws(ClickHouseError) -> [ClickHouseTypedColumn] {
+        var index: [String: ClickHouseTypedColumn] = [:]
+        index.reserveCapacity(columns.count)
+        for column in columns { index[column.name] = column.column }
+        var bound: [ClickHouseTypedColumn] = []
+        bound.reserveCapacity(names.count)
+        for name in names {
+            guard let column = index[name] else {
+                throw .protocolError(stage: "decoder.fastRow", message: "result has no column named '\(name)'")
+            }
+            bound.append(column)
+        }
+        return bound
+    }
+
+    // Fused fast path: parse the block body in one pass into direct byte
+    // views (fixed-width base offsets, String byte ranges) and hand them to
+    // the type's decodeFused. No intermediate typed-column arrays and no
+    // per-string allocation.
+    package static func decodeFusedRows<T: ClickHouseFusedDecodable>(
+        type: T.Type,
+        block: ClickHouseBlock,
+        body: UnsafeRawBufferPointer
+    ) throws(ClickHouseError) -> [T] {
+        if block.rowCount == 0 { return [] }
+        guard let base = body.baseAddress else {
+            throw .protocolError(stage: "decoder.raw", message: "block body is empty")
+        }
+        let bytePtr = base.assumingMemoryBound(to: UInt8.self)
+        let rowCount = block.rowCount
+        let limit = body.count
+        var blockBaseOffset = [Int](repeating: 0, count: block.columnCount)
+        var columnSpanBase = [Int](repeating: -1, count: block.columnCount)
+        var stringSpans = [Int]()
+        var offset = 0
+        for column in 0..<block.columnCount {
+            let width = fixedElementWidth(block.columnTypes[column])
+            if width >= 0 {
+                blockBaseOffset[column] = offset
+                offset += rowCount * width
+            } else if block.columnTypes[column] == "String" {
+                columnSpanBase[column] = stringSpans.count
+                stringSpans.reserveCapacity(stringSpans.count + rowCount * 2)
+                for _ in 0..<rowCount {
+                    let parsed: (UInt64, Int)
+                    do {
+                        parsed = try ClickHouseWire.readUVarInt(base: bytePtr, offset: offset, limit: limit)
+                    } catch {
+                        throw .protocolError(stage: "decoder.raw", message: "malformed String length")
+                    }
+                    let dataStart = offset + parsed.1
+                    let dataEnd = dataStart + Int(parsed.0)
+                    if dataEnd > limit { throw .protocolError(stage: "decoder.raw", message: "String body overruns block") }
+                    stringSpans.append(dataStart)
+                    stringSpans.append(Int(parsed.0))
+                    offset = dataEnd
+                }
+            } else {
+                throw .protocolError(stage: "decoder.raw", message: "fused path does not support column type \(block.columnTypes[column])")
+            }
+        }
+        var nameToColumn: [String: Int] = [:]
+        nameToColumn.reserveCapacity(block.columnCount)
+        for column in 0..<block.columnCount { nameToColumn[block.columnNames[column]] = column }
+        var fieldBaseOffset: [Int] = []
+        var fieldStringBase: [Int] = []
+        for name in T.clickHouseColumnNames {
+            guard let column = nameToColumn[name] else {
+                throw .protocolError(stage: "decoder.raw", message: "result has no column named '\(name)'")
+            }
+            fieldBaseOffset.append(blockBaseOffset[column])
+            fieldStringBase.append(columnSpanBase[column])
+        }
+        let raw = ClickHouseRawBlock(
+            base: base,
+            columnBaseOffset: fieldBaseOffset,
+            stringSpans: stringSpans,
+            stringFieldBase: fieldStringBase,
+            count: rowCount
+        )
+        return try T.decodeFused(raw)
+    }
+
+    // The on-wire element width of a fixed-width column type, or -1 for a
+    // variable-width (String) or non-fixed (Array/Nullable/Map/...) type. The
+    // fused parser uses this to size every column in the block so it can find
+    // the byte offset of the columns it decodes, even when the result contains
+    // other fixed-width columns (DateTime, UUID, Decimal, an unrequested
+    // column) it does not itself materialise.
+    private static func fixedElementWidth(_ typeName: String) -> Int {
+        switch typeName {
+        case "UInt8", "Int8", "Bool", "Enum8": 1
+        case "UInt16", "Int16", "Date": 2
+        case "UInt32", "Int32", "Float32", "DateTime", "Date32", "IPv4", "Enum16": 4
+        case "UInt64", "Int64", "Float64", "DateTime64": 8
+        case "UInt128", "Int128", "UUID", "IPv6", "Decimal128": 16
+        case "UInt256", "Int256", "Decimal256": 32
+        case "Decimal32": 4
+        case "Decimal64": 8
+        default: parameterizedFixedWidth(typeName)
+        }
+    }
+
+    private static func parameterizedFixedWidth(_ typeName: String) -> Int {
+        if typeName.hasPrefix("Enum8(") { return 1 }
+        if typeName.hasPrefix("Enum16(") { return 2 }
+        if typeName.hasPrefix("DateTime64(") { return 8 }
+        if typeName.hasPrefix("DateTime(") { return 4 }
+        if typeName.hasPrefix("Decimal32(") { return 4 }
+        if typeName.hasPrefix("Decimal64(") { return 8 }
+        if typeName.hasPrefix("Decimal128(") { return 16 }
+        if typeName.hasPrefix("Decimal256(") { return 32 }
+        if typeName.hasPrefix("FixedString(") {
+            return Int(typeName.dropFirst("FixedString(".count).dropLast()) ?? -1
+        }
+        if typeName.hasPrefix("Decimal(") {
+            return decimalWidthFromParameters(typeName)
+        }
+        return -1
+    }
+
+    private static func decimalWidthFromParameters(_ typeName: String) -> Int {
+        let inner = typeName.dropFirst("Decimal(".count).dropLast()
+        let firstField = inner.split(separator: ",").first.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+        guard let precision = UInt8(firstField) else { return -1 }
+        return ClickHouseDecimalWidth.bytes(forPrecision: precision)
     }
 
     private static func decodeOneRow<T: Decodable>(
@@ -304,17 +449,176 @@ public enum ClickHouseCodableDecoder {
         if inner.hasPrefix("Tuple(") {
             return try parseArrayOfTupleColumn(innerTupleTypeName: inner, rowCount: rowCount, base: base, offset: offset, limit: limit)
         }
+        if inner.hasPrefix("Nullable(") {
+            return try parseArrayOfNullableColumn(arrayTypeName: typeName, innerNullable: inner, rowCount: rowCount, base: base, offset: offset, limit: limit)
+        }
+        if inner.hasPrefix("Array(") {
+            return try parseNestedArrayColumn(arrayTypeName: typeName, innerArrayTypeName: inner, rowCount: rowCount, base: base, offset: offset, limit: limit)
+        }
+        if inner.hasPrefix("LowCardinality(") {
+            return try parseArrayOfLowCardinalityColumn(arrayTypeName: typeName, innerLowCardinality: inner, rowCount: rowCount, base: base, offset: offset, limit: limit)
+        }
         let element = try parseArrayElementType(typeName: typeName)
         if rowCount == 0 {
             return .init(column: .array([], element: element), nextOffset: offset)
         }
         let offsets: [UInt64] = try parseFixedWidth(rowCount: rowCount, base: base, offset: offset, limit: limit, typeName: typeName)
         var cursor = offset + rowCount * 8
-        let totalElements = Int(offsets[rowCount - 1])
+        let totalElements = try boundedElementCount(offsets[rowCount - 1], available: limit - cursor, typeName: typeName, stage: "decoder.array")
         let flat = try readArrayElements(element: element, count: totalElements, base: base, offset: cursor, limit: limit, typeName: typeName)
         cursor = flat.nextOffset
         let perRow = try groupArrayElements(flat.elements, offsets: offsets, typeName: typeName)
         return .init(column: .array(perRow, element: element), nextOffset: cursor)
+    }
+
+    // Array(Nullable(T)) on the wire: rowCount cumulative offsets, then the
+    // flattened inner column as a Nullable(T) — a totalElements-byte null mask
+    // (1 = NULL) followed by totalElements inner-T values (NULL slots still
+    // carry a placeholder value). We lift the mask onto the values and group
+    // by the offsets so the decoder yields per-row arrays of nullable
+    // elements.
+    private static func parseArrayOfNullableColumn(
+        arrayTypeName: String,
+        innerNullable: String,
+        rowCount: Int,
+        base: UnsafePointer<UInt8>,
+        offset: Int,
+        limit: Int
+    ) throws(ClickHouseError) -> ColumnParseResult {
+        let innerType = String(innerNullable.dropFirst("Nullable(".count).dropLast())
+        let element = try parseArrayElementType(typeName: "Array(\(innerType))")
+        if rowCount == 0 {
+            return .init(column: .arrayOfNullable(perRow: [], element: element), nextOffset: offset)
+        }
+        let offsets: [UInt64] = try parseFixedWidth(rowCount: rowCount, base: base, offset: offset, limit: limit, typeName: arrayTypeName)
+        var cursor = offset + rowCount * 8
+        let totalElements = try boundedElementCount(offsets[rowCount - 1], available: limit - cursor, typeName: arrayTypeName, stage: "decoder.arrayOfNullable")
+        try requireBytes(totalElements, available: limit - cursor, typeName: arrayTypeName)
+        var mask: [Bool] = []
+        mask.reserveCapacity(totalElements)
+        for index in 0..<totalElements { mask.append(base[cursor + index] != 0) }
+        cursor += totalElements
+        let flat = try readArrayElements(element: element, count: totalElements, base: base, offset: cursor, limit: limit, typeName: arrayTypeName)
+        cursor = flat.nextOffset
+        var combined: [ClickHouseNullable<[UInt8]>] = []
+        combined.reserveCapacity(totalElements)
+        for index in 0..<totalElements {
+            combined.append(mask[index] ? .absent : .present(flat.elements[index]))
+        }
+        let perRow = try groupByOffsets(combined, offsets: offsets, stage: "decoder.arrayOfNullable", typeName: arrayTypeName)
+        return .init(column: .arrayOfNullable(perRow: perRow, element: element), nextOffset: cursor)
+    }
+
+    // Array(LowCardinality(String)) / Array(LowCardinality(FixedString(N))) on the
+    // wire: rowCount cumulative offsets, then the flattened inner values as a
+    // single LowCardinality sub-column (its own version prefix, dictionary, and
+    // one key per element). We resolve each key through the dictionary and group
+    // by the offsets, yielding per-row arrays whose element type mirrors the
+    // dictionary's so a FixedString element trims its padding like a plain
+    // Array(FixedString) and a String element reads verbatim.
+    private static func parseArrayOfLowCardinalityColumn(
+        arrayTypeName: String,
+        innerLowCardinality: String,
+        rowCount: Int,
+        base: UnsafePointer<UInt8>,
+        offset: Int,
+        limit: Int
+    ) throws(ClickHouseError) -> ColumnParseResult {
+        let inner = try parseLowCardinalityInner(typeName: innerLowCardinality)
+        let element = arrayElementType(forLowCardinalityInner: inner)
+        if rowCount == 0 {
+            return .init(column: .array([], element: element), nextOffset: offset)
+        }
+        _ = try readUInt64Scalar(base: base, offset: offset, limit: limit)
+        let offsets: [UInt64] = try parseFixedWidth(rowCount: rowCount, base: base, offset: offset + 8, limit: limit, typeName: arrayTypeName)
+        let cursor = offset + 8 + rowCount * 8
+        let totalElements = try boundedElementCount(offsets[rowCount - 1], available: limit - cursor, typeName: arrayTypeName, stage: "decoder.array")
+        return try resolveArrayLowCardinality(offsets: offsets, totalElements: totalElements, rowCount: rowCount, inner: inner, element: element, arrayTypeName: arrayTypeName, base: base, offset: cursor, limit: limit)
+    }
+
+    private static func arrayElementType(forLowCardinalityInner inner: ClickHouseLowCardinalityInner) -> ClickHouseArrayElementType {
+        switch inner {
+        case .string: .string
+        case .fixedString(let length): .fixedString(length: length)
+        }
+    }
+
+    // An all-empty Array(LowCardinality) column (totalElements == 0) stops after
+    // the hoisted version and the offsets — the dictionary bulk is omitted — so
+    // every row is an empty array. Otherwise the dictionary bulk follows and each
+    // key resolves through it before grouping by the offsets.
+    private static func resolveArrayLowCardinality(
+        offsets: [UInt64],
+        totalElements: Int,
+        rowCount: Int,
+        inner: ClickHouseLowCardinalityInner,
+        element: ClickHouseArrayElementType,
+        arrayTypeName: String,
+        base: UnsafePointer<UInt8>,
+        offset: Int,
+        limit: Int
+    ) throws(ClickHouseError) -> ColumnParseResult {
+        guard totalElements > 0 else {
+            return .init(column: .array([[[UInt8]]](repeating: [], count: rowCount), element: element), nextOffset: offset)
+        }
+        let structure = try readLowCardinalityBulk(inner: inner, typeName: arrayTypeName, base: base, offset: offset, limit: limit)
+        guard structure.indices.count == totalElements else {
+            throw .protocolError(stage: "decoder.array", message: "low-cardinality index count \(structure.indices.count) does not match array element count \(totalElements) in \(arrayTypeName)")
+        }
+        let elements = structure.indices.map { structure.dictionary[$0] }
+        let perRow = try groupByOffsets(elements, offsets: offsets, stage: "decoder.array", typeName: arrayTypeName)
+        return .init(column: .array(perRow, element: element), nextOffset: structure.nextOffset)
+    }
+
+    // Array(Array(T)) on the wire: rowCount outer offsets, then totalOuter
+    // inner offsets, then the flattened innermost T elements. We group the
+    // elements by the inner offsets into inner arrays, then group the inner
+    // arrays by the outer offsets into per-row [[T]]. Only one level of
+    // nesting (the innermost element must be a scalar element type);
+    // Array(Array(Array(T))) falls back to the unsupported-element rejection.
+    private static func parseNestedArrayColumn(
+        arrayTypeName: String,
+        innerArrayTypeName: String,
+        rowCount: Int,
+        base: UnsafePointer<UInt8>,
+        offset: Int,
+        limit: Int
+    ) throws(ClickHouseError) -> ColumnParseResult {
+        let element = try parseArrayElementType(typeName: innerArrayTypeName)
+        if rowCount == 0 {
+            return .init(column: .nestedArray(perRow: [], element: element), nextOffset: offset)
+        }
+        let outerOffsets: [UInt64] = try parseFixedWidth(rowCount: rowCount, base: base, offset: offset, limit: limit, typeName: arrayTypeName)
+        var cursor = offset + rowCount * 8
+        let totalOuter = try boundedElementCount(outerOffsets[rowCount - 1], available: limit - cursor, typeName: arrayTypeName, stage: "decoder.nestedArray")
+        let innerOffsets: [UInt64] = try parseFixedWidth(rowCount: totalOuter, base: base, offset: cursor, limit: limit, typeName: arrayTypeName)
+        cursor += totalOuter * 8
+        var totalInner = 0
+        if totalOuter > 0 {
+            totalInner = try boundedElementCount(innerOffsets[totalOuter - 1], available: limit - cursor, typeName: arrayTypeName, stage: "decoder.nestedArray")
+        }
+        let flat = try readArrayElements(element: element, count: totalInner, base: base, offset: cursor, limit: limit, typeName: arrayTypeName)
+        cursor = flat.nextOffset
+        let innerArrays = try groupByOffsets(flat.elements, offsets: innerOffsets, stage: "decoder.nestedArray", typeName: arrayTypeName)
+        let perRow = try groupByOffsets(innerArrays, offsets: outerOffsets, stage: "decoder.nestedArray", typeName: arrayTypeName)
+        return .init(column: .nestedArray(perRow: perRow, element: element), nextOffset: cursor)
+    }
+
+    private static func groupByOffsets<Element>(_ flat: [Element], offsets: [UInt64], stage: String, typeName: String) throws(ClickHouseError) -> [[Element]] {
+        var perRow: [[Element]] = []
+        perRow.reserveCapacity(offsets.count)
+        var start = 0
+        for offset in offsets {
+            guard let end = Int(exactly: offset) else {
+                throw .protocolError(stage: stage, message: "offset \(offset) exceeds Int range in \(typeName)")
+            }
+            if end < start || end > flat.count {
+                throw .protocolError(stage: stage, message: "offset \(end) out of element range \(flat.count) in \(typeName)")
+            }
+            perRow.append(Array(flat[start..<end]))
+            start = end
+        }
+        return perRow
     }
 
     private static func parseTupleColumn(
@@ -347,6 +651,16 @@ public enum ClickHouseCodableDecoder {
         offset: Int,
         limit: Int
     ) throws(ClickHouseError) -> ColumnParseResult {
+        let (keyTypeName, valueTypeName) = try mapKeyValueTypeNames(typeName: typeName)
+        if valueTypeName.hasPrefix("Nullable(") {
+            return try parseMapWithNullableValuesColumn(typeName: typeName, keyTypeName: keyTypeName, valueTypeName: valueTypeName, rowCount: rowCount, base: base, offset: offset, limit: limit)
+        }
+        if valueTypeName.hasPrefix("Array(") {
+            return try parseMapWithArrayValuesColumn(typeName: typeName, keyTypeName: keyTypeName, valueTypeName: valueTypeName, rowCount: rowCount, base: base, offset: offset, limit: limit)
+        }
+        if keyTypeName.hasPrefix("LowCardinality(") || valueTypeName.hasPrefix("LowCardinality(") {
+            return try parseMapWithLowCardinalitySidesColumn(typeName: typeName, keyTypeName: keyTypeName, valueTypeName: valueTypeName, rowCount: rowCount, base: base, offset: offset, limit: limit)
+        }
         let elementTypes = try parseMapElementTypes(typeName: typeName)
         if rowCount == 0 {
             return .init(
@@ -356,7 +670,7 @@ public enum ClickHouseCodableDecoder {
         }
         let offsets: [UInt64] = try parseFixedWidth(rowCount: rowCount, base: base, offset: offset, limit: limit, typeName: typeName)
         var cursor = offset + rowCount * 8
-        let totalElements = Int(offsets[rowCount - 1])
+        let totalElements = try boundedElementCount(offsets[rowCount - 1], available: limit - cursor, typeName: typeName, stage: "decoder.map")
         let flatKeys = try readArrayElements(element: elementTypes.key, count: totalElements, base: base, offset: cursor, limit: limit, typeName: typeName)
         cursor = flatKeys.nextOffset
         let flatValues = try readArrayElements(element: elementTypes.value, count: totalElements, base: base, offset: cursor, limit: limit, typeName: typeName)
@@ -369,6 +683,178 @@ public enum ClickHouseCodableDecoder {
         )
     }
 
+    private static func mapKeyValueTypeNames(typeName: String) throws(ClickHouseError) -> (key: String, value: String) {
+        let inner = String(typeName.dropFirst("Map(".count).dropLast())
+        let elements = try ClickHouseTupleTypeSplitter.split(typeName: "Tuple(\(inner))")
+        if elements.count != 2 {
+            throw .protocolError(stage: "decoder.map", message: "Map needs exactly 2 inner types, got \(elements.count) in \(typeName)")
+        }
+        return (elements[0].type, elements[1].type)
+    }
+
+    // Map(K, Nullable(V)): rowCount cumulative offsets, then the flattened keys
+    // (a K column), then the flattened values as a Nullable(V) column — a
+    // totalElements null mask followed by totalElements V values. We lift the
+    // mask onto the values and group keys and values by the offsets so each
+    // row becomes a [K: V?] map.
+    private static func parseMapWithNullableValuesColumn(
+        typeName: String,
+        keyTypeName: String,
+        valueTypeName: String,
+        rowCount: Int,
+        base: UnsafePointer<UInt8>,
+        offset: Int,
+        limit: Int
+    ) throws(ClickHouseError) -> ColumnParseResult {
+        let keyElement = try parseMapElementType(typeName: keyTypeName, mapTypeName: typeName)
+        let innerValueType = String(valueTypeName.dropFirst("Nullable(".count).dropLast())
+        let valueElement = try parseMapElementType(typeName: innerValueType, mapTypeName: typeName)
+        if rowCount == 0 {
+            return .init(column: .mapWithNullableValues(keys: [], values: [], keyElement: keyElement, valueElement: valueElement), nextOffset: offset)
+        }
+        let offsets: [UInt64] = try parseFixedWidth(rowCount: rowCount, base: base, offset: offset, limit: limit, typeName: typeName)
+        var cursor = offset + rowCount * 8
+        let totalElements = try boundedElementCount(offsets[rowCount - 1], available: limit - cursor, typeName: typeName, stage: "decoder.map")
+        let flatKeys = try readArrayElements(element: keyElement, count: totalElements, base: base, offset: cursor, limit: limit, typeName: typeName)
+        cursor = flatKeys.nextOffset
+        try requireBytes(totalElements, available: limit - cursor, typeName: typeName)
+        var mask: [Bool] = []
+        mask.reserveCapacity(totalElements)
+        for index in 0..<totalElements { mask.append(base[cursor + index] != 0) }
+        cursor += totalElements
+        let flatValues = try readArrayElements(element: valueElement, count: totalElements, base: base, offset: cursor, limit: limit, typeName: typeName)
+        cursor = flatValues.nextOffset
+        var combinedValues: [ClickHouseNullable<[UInt8]>] = []
+        combinedValues.reserveCapacity(totalElements)
+        for index in 0..<totalElements {
+            combinedValues.append(mask[index] ? .absent : .present(flatValues.elements[index]))
+        }
+        let perRowKeys = try groupByOffsets(flatKeys.elements, offsets: offsets, stage: "decoder.map", typeName: typeName)
+        let perRowValues = try groupByOffsets(combinedValues, offsets: offsets, stage: "decoder.map", typeName: typeName)
+        return .init(column: .mapWithNullableValues(keys: perRowKeys, values: perRowValues, keyElement: keyElement, valueElement: valueElement), nextOffset: cursor)
+    }
+
+    // Map(K, Array(V)): a LowCardinality key hoists its serialization version
+    // ahead of the map offsets (the value being Array is never a direct
+    // LowCardinality side, so only the key hoists), then rowCount cumulative
+    // entry offsets, then the keys (a LowCardinality dictionary bulk or a flat K
+    // column over totalEntries), then the values as an Array(V) column over the
+    // same totalEntries — its own per-entry offsets and flattened elements. The
+    // key side and the value sub-column are read by the shared LowCardinality and
+    // array parsers and regrouped from per-entry back to per-row by the outer map
+    // offsets, so each row yields its keys paired with their element arrays. A
+    // LowCardinality array element (Array(LowCardinality(V))) hoists its own
+    // version differently and is rejected here before any bytes are read rather
+    // than mis-framed; parseMapElementType throws for the LowCardinality inner.
+    private static func parseMapWithArrayValuesColumn(
+        typeName: String,
+        keyTypeName: String,
+        valueTypeName: String,
+        rowCount: Int,
+        base: UnsafePointer<UInt8>,
+        offset: Int,
+        limit: Int
+    ) throws(ClickHouseError) -> ColumnParseResult {
+        let keyElement = try mapSideElementType(typeName: keyTypeName, mapTypeName: typeName)
+        let innerValueType = String(valueTypeName.dropFirst("Array(".count).dropLast())
+        let valueElement = try parseMapElementType(typeName: innerValueType, mapTypeName: typeName)
+        if rowCount == 0 {
+            return .init(column: .mapWithArrayValues(keys: [], values: [], keyElement: keyElement, valueElement: valueElement), nextOffset: offset)
+        }
+        var cursor = offset
+        if keyTypeName.hasPrefix("LowCardinality(") {
+            _ = try readUInt64Scalar(base: base, offset: cursor, limit: limit)
+            cursor += 8
+        }
+        let offsets: [UInt64] = try parseFixedWidth(rowCount: rowCount, base: base, offset: cursor, limit: limit, typeName: typeName)
+        cursor += rowCount * 8
+        let totalEntries = try boundedElementCount(offsets[rowCount - 1], available: limit - cursor, typeName: typeName, stage: "decoder.map")
+        let keySide = try readMapSideElements(typeName: keyTypeName, totalElements: totalEntries, base: base, offset: cursor, limit: limit, mapTypeName: typeName)
+        cursor = keySide.nextOffset
+        let valueColumn = try parseArrayColumn(typeName: valueTypeName, rowCount: totalEntries, base: base, offset: cursor, limit: limit)
+        cursor = valueColumn.nextOffset
+        guard case .array(let perEntryValues, _) = valueColumn.column else {
+            throw .protocolError(stage: "decoder.map", message: "Map value column \(valueTypeName) did not decode as an array in \(typeName)")
+        }
+        let perRowKeys = try groupArrayElements(keySide.elements, offsets: offsets, typeName: typeName)
+        let perRowValues = try groupByOffsets(perEntryValues, offsets: offsets, stage: "decoder.map", typeName: typeName)
+        return .init(column: .mapWithArrayValues(keys: perRowKeys, values: perRowValues, keyElement: keyElement, valueElement: valueElement), nextOffset: cursor)
+    }
+
+    // Map(K, V) where K and/or V is LowCardinality. Each LowCardinality side
+    // hoists its KeysSerializationVersion (8 bytes) ahead of the map offsets, in
+    // key-then-value order, the same as Array(LowCardinality); reading it inline
+    // with the dictionary would mis-frame the block and desync the connection.
+    // After the offsets, each side's body follows: a LowCardinality side carries
+    // its dictionary bulk (omitted when the map has no entries), a plain side its
+    // flattened elements. Resolving each LowCardinality key through its dictionary
+    // yields a plain Map column whose element type mirrors the dictionary, so the
+    // existing [String: V] decode handles it unchanged.
+    private static func parseMapWithLowCardinalitySidesColumn(
+        typeName: String,
+        keyTypeName: String,
+        valueTypeName: String,
+        rowCount: Int,
+        base: UnsafePointer<UInt8>,
+        offset: Int,
+        limit: Int
+    ) throws(ClickHouseError) -> ColumnParseResult {
+        let keyElement = try mapSideElementType(typeName: keyTypeName, mapTypeName: typeName)
+        let valueElement = try mapSideElementType(typeName: valueTypeName, mapTypeName: typeName)
+        if rowCount == 0 {
+            return .init(column: .map(keys: [], values: [], keyElement: keyElement, valueElement: valueElement), nextOffset: offset)
+        }
+        var cursor = offset
+        if keyTypeName.hasPrefix("LowCardinality(") {
+            _ = try readUInt64Scalar(base: base, offset: cursor, limit: limit)
+            cursor += 8
+        }
+        if valueTypeName.hasPrefix("LowCardinality(") {
+            _ = try readUInt64Scalar(base: base, offset: cursor, limit: limit)
+            cursor += 8
+        }
+        let offsets: [UInt64] = try parseFixedWidth(rowCount: rowCount, base: base, offset: cursor, limit: limit, typeName: typeName)
+        cursor += rowCount * 8
+        let totalElements = try boundedElementCount(offsets[rowCount - 1], available: limit - cursor, typeName: typeName, stage: "decoder.map")
+        let keySide = try readMapSideElements(typeName: keyTypeName, totalElements: totalElements, base: base, offset: cursor, limit: limit, mapTypeName: typeName)
+        cursor = keySide.nextOffset
+        let valueSide = try readMapSideElements(typeName: valueTypeName, totalElements: totalElements, base: base, offset: cursor, limit: limit, mapTypeName: typeName)
+        cursor = valueSide.nextOffset
+        let perRowKeys = try groupArrayElements(keySide.elements, offsets: offsets, typeName: typeName)
+        let perRowValues = try groupArrayElements(valueSide.elements, offsets: offsets, typeName: typeName)
+        return .init(column: .map(keys: perRowKeys, values: perRowValues, keyElement: keyElement, valueElement: valueElement), nextOffset: cursor)
+    }
+
+    private static func mapSideElementType(typeName: String, mapTypeName: String) throws(ClickHouseError) -> ClickHouseArrayElementType {
+        if typeName.hasPrefix("LowCardinality(") {
+            return arrayElementType(forLowCardinalityInner: try parseLowCardinalityInner(typeName: typeName))
+        }
+        return try parseMapElementType(typeName: typeName, mapTypeName: mapTypeName)
+    }
+
+    private struct MapSideElements {
+        let elements: [[UInt8]]
+        let nextOffset: Int
+    }
+
+    private static func readMapSideElements(typeName: String, totalElements: Int, base: UnsafePointer<UInt8>, offset: Int, limit: Int, mapTypeName: String) throws(ClickHouseError) -> MapSideElements {
+        guard typeName.hasPrefix("LowCardinality(") else {
+            let element = try parseMapElementType(typeName: typeName, mapTypeName: mapTypeName)
+            let flat = try readArrayElements(element: element, count: totalElements, base: base, offset: offset, limit: limit, typeName: mapTypeName)
+            return MapSideElements(elements: flat.elements, nextOffset: flat.nextOffset)
+        }
+        if totalElements == 0 {
+            return MapSideElements(elements: [], nextOffset: offset)
+        }
+        let inner = try parseLowCardinalityInner(typeName: typeName)
+        let structure = try readLowCardinalityBulk(inner: inner, typeName: mapTypeName, base: base, offset: offset, limit: limit)
+        guard structure.indices.count == totalElements else {
+            throw .protocolError(stage: "decoder.map", message: "low-cardinality index count \(structure.indices.count) does not match map element count \(totalElements) in \(mapTypeName)")
+        }
+        let elements = structure.indices.map { structure.dictionary[$0] }
+        return MapSideElements(elements: elements, nextOffset: structure.nextOffset)
+    }
+
     private static func parseVariantColumn(
         typeName: String,
         rowCount: Int,
@@ -377,6 +863,9 @@ public enum ClickHouseCodableDecoder {
         limit: Int
     ) throws(ClickHouseError) -> ColumnParseResult {
         let members = try parseVariantMemberTypes(typeName: typeName)
+        if members.count > 255 {
+            throw ClickHouseError.protocolError(stage: "decoder.variant", message: "Variant declares \(members.count) members; the wire discriminator is one byte and supports at most 255")
+        }
         if rowCount == 0 {
             return .init(column: .variant(members: members, discriminators: [], values: []), nextOffset: offset)
         }
@@ -446,6 +935,9 @@ public enum ClickHouseCodableDecoder {
         }
         let prefix = try readDynamicPrefix(base: base, offset: offset, limit: limit)
         let members = prefix.members
+        if members.count > 255 {
+            throw ClickHouseError.protocolError(stage: "decoder.dynamic", message: "Dynamic declares \(members.count) members; the wire discriminator is one byte and supports at most 255")
+        }
         try requireBytes(8 + rowCount, available: limit - prefix.nextOffset, typeName: "Dynamic")
         let rawDiscriminators = readVariantDiscriminators(rowCount: rowCount, base: base, offset: prefix.nextOffset + 8)
         let normalized = normalizeDynamicDiscriminators(rawDiscriminators, memberCount: members.count)
@@ -481,9 +973,10 @@ public enum ClickHouseCodableDecoder {
             }
             let memberCount = try ClickHouseWire.readUVarInt(base: base, offset: cursor, limit: limit)
             cursor += memberCount.1
+            let memberCountInt = try boundedElementCount(memberCount.0, available: limit - cursor, typeName: "Dynamic", stage: "decoder.parseDynamic")
             var members: [ClickHouseArrayElementType] = []
-            members.reserveCapacity(Int(memberCount.0))
-            for _ in 0..<Int(memberCount.0) {
+            members.reserveCapacity(memberCountInt)
+            for _ in 0..<memberCountInt {
                 let name = try ClickHouseWire.readString(base: base, offset: cursor, limit: limit)
                 cursor += name.1
                 members.append(try parseMapElementType(typeName: name.0, mapTypeName: "Dynamic"))
@@ -525,36 +1018,44 @@ public enum ClickHouseCodableDecoder {
         offset: Int,
         limit: Int
     ) throws(ClickHouseError) -> ColumnParseResult {
-        let elementTypes = try parseArrayOfTupleElementTypes(innerTupleTypeName: innerTupleTypeName)
+        let parsed = try parseArrayOfTupleElementTypes(innerTupleTypeName: innerTupleTypeName)
         if rowCount == 0 {
+            let empty = Array(repeating: [[[UInt8]]](), count: parsed.elements.count)
             return .init(
-                column: .arrayOfTuple(firstValues: [], secondValues: [], firstElement: elementTypes.first, secondElement: elementTypes.second),
+                column: .arrayOfTuple(elementValues: empty, elements: parsed.elements, names: parsed.names),
                 nextOffset: offset
             )
         }
         let offsets: [UInt64] = try parseFixedWidth(rowCount: rowCount, base: base, offset: offset, limit: limit, typeName: innerTupleTypeName)
         var cursor = offset + rowCount * 8
-        let totalElements = Int(offsets[rowCount - 1])
-        let flatFirst = try readArrayElements(element: elementTypes.first, count: totalElements, base: base, offset: cursor, limit: limit, typeName: innerTupleTypeName)
-        cursor = flatFirst.nextOffset
-        let flatSecond = try readArrayElements(element: elementTypes.second, count: totalElements, base: base, offset: cursor, limit: limit, typeName: innerTupleTypeName)
-        cursor = flatSecond.nextOffset
-        let perRowFirst = try groupArrayElements(flatFirst.elements, offsets: offsets, typeName: innerTupleTypeName)
-        let perRowSecond = try groupArrayElements(flatSecond.elements, offsets: offsets, typeName: innerTupleTypeName)
+        let totalElements = try boundedElementCount(offsets[rowCount - 1], available: limit - cursor, typeName: innerTupleTypeName, stage: "decoder.arrayOfTuple")
+        var elementValues: [[[[UInt8]]]] = []
+        elementValues.reserveCapacity(parsed.elements.count)
+        for element in parsed.elements {
+            let flat = try readArrayElements(element: element, count: totalElements, base: base, offset: cursor, limit: limit, typeName: innerTupleTypeName)
+            cursor = flat.nextOffset
+            elementValues.append(try groupArrayElements(flat.elements, offsets: offsets, typeName: innerTupleTypeName))
+        }
         return .init(
-            column: .arrayOfTuple(firstValues: perRowFirst, secondValues: perRowSecond, firstElement: elementTypes.first, secondElement: elementTypes.second),
+            column: .arrayOfTuple(elementValues: elementValues, elements: parsed.elements, names: parsed.names),
             nextOffset: cursor
         )
     }
 
-    private static func parseArrayOfTupleElementTypes(innerTupleTypeName: String) throws(ClickHouseError) -> (first: ClickHouseArrayElementType, second: ClickHouseArrayElementType) {
-        let elements = try ClickHouseTupleTypeSplitter.split(typeName: innerTupleTypeName)
-        if elements.count != 2 {
-            throw .protocolError(stage: "decoder.arrayOfTuple", message: "Array(Tuple) needs exactly 2 inner types, got \(elements.count) in \(innerTupleTypeName)")
+    private static func parseArrayOfTupleElementTypes(innerTupleTypeName: String) throws(ClickHouseError) -> (elements: [ClickHouseArrayElementType], names: [String]) {
+        let splitElements = try ClickHouseTupleTypeSplitter.split(typeName: innerTupleTypeName)
+        if splitElements.count < 2 {
+            throw .protocolError(stage: "decoder.arrayOfTuple", message: "Array(Tuple) needs at least 2 inner types, got \(splitElements.count) in \(innerTupleTypeName)")
         }
-        let first = try parseMapElementType(typeName: elements[0].type, mapTypeName: innerTupleTypeName)
-        let second = try parseMapElementType(typeName: elements[1].type, mapTypeName: innerTupleTypeName)
-        return (first, second)
+        var types: [ClickHouseArrayElementType] = []
+        types.reserveCapacity(splitElements.count)
+        var names: [String] = []
+        names.reserveCapacity(splitElements.count)
+        for element in splitElements {
+            types.append(try parseMapElementType(typeName: element.type, mapTypeName: innerTupleTypeName))
+            names.append(element.name)
+        }
+        return (types, names)
     }
 
     private static func parseMapElementTypes(typeName: String) throws(ClickHouseError) -> (key: ClickHouseArrayElementType, value: ClickHouseArrayElementType) {
@@ -571,6 +1072,7 @@ public enum ClickHouseCodableDecoder {
     private static func parseMapElementType(typeName: String, mapTypeName: String) throws(ClickHouseError) -> ClickHouseArrayElementType {
         switch typeName {
         case "String": return .string
+        case "Bool": return .bool
         case "Int8": return .int8
         case "Int16": return .int16
         case "Int32": return .int32
@@ -581,7 +1083,33 @@ public enum ClickHouseCodableDecoder {
         case "UInt64": return .uint64
         case "Float32": return .float32
         case "Float64": return .float64
+        case "DateTime": return .dateTime
+        case "Date": return .date
+        case "Date32": return .date32
+        case "UUID": return .uuid
+        case "IPv4": return .ipv4
+        case "IPv6": return .ipv6
+        case "Int128": return .int128
+        case "UInt128": return .uint128
+        case "Int256": return .int256
+        case "UInt256": return .uint256
         default:
+            if typeName.hasPrefix("DateTime64(") {
+                return .dateTime64(precision: try parseDateTime64Precision(typeName: typeName))
+            }
+            if typeName.hasPrefix("DateTime(") {
+                return .dateTime
+            }
+            if typeName.hasPrefix("Decimal") {
+                let parameters = try parseDecimalParameters(typeName: typeName)
+                return .decimal(precision: parameters.precision, scale: parameters.scale)
+            }
+            if typeName.hasPrefix("Enum8(") {
+                return .enum8(mapping: try parseEnumMapping(typeName: typeName, prefixCount: "Enum8(".utf8.count))
+            }
+            if typeName.hasPrefix("Enum16(") {
+                return .enum16(mapping: try parseEnumMapping(typeName: typeName, prefixCount: "Enum16(".utf8.count))
+            }
             if typeName.hasPrefix("FixedString(") {
                 return .fixedString(length: try parseFixedStringLength(typeName: typeName))
             }
@@ -594,7 +1122,9 @@ public enum ClickHouseCodableDecoder {
         perRow.reserveCapacity(offsets.count)
         var start = 0
         for offset in offsets {
-            let end = Int(offset)
+            guard let end = Int(exactly: offset) else {
+                throw .protocolError(stage: "decoder.array", message: "offset \(offset) exceeds Int range in \(typeName)")
+            }
             if end < start || end > flat.count {
                 throw .protocolError(stage: "decoder.array", message: "offset \(end) out of element range \(flat.count) in \(typeName)")
             }
@@ -619,8 +1149,8 @@ public enum ClickHouseCodableDecoder {
     ) throws(ClickHouseError) -> ArrayElementsResult {
         let width = element.fixedWidth
         if width < 0 {
-            let (strings, consumed) = try parseStringColumn(rowCount: count, base: base, offset: offset, limit: limit)
-            return ArrayElementsResult(elements: strings.map { Array($0.utf8) }, nextOffset: offset + consumed)
+            let (byteStrings, consumed) = try parseStringColumn(rowCount: count, base: base, offset: offset, limit: limit)
+            return ArrayElementsResult(elements: byteStrings, nextOffset: offset + consumed)
         }
         try requireBytes(count * width, available: limit - offset, typeName: typeName)
         var elements: [[UInt8]] = []
@@ -641,6 +1171,7 @@ public enum ClickHouseCodableDecoder {
         let inner = String(typeName.dropFirst("Array(".count).dropLast())
         switch inner {
         case "String": return .string
+        case "Bool": return .bool
         case "Int8": return .int8
         case "Int16": return .int16
         case "Int32": return .int32
@@ -651,7 +1182,43 @@ public enum ClickHouseCodableDecoder {
         case "UInt64": return .uint64
         case "Float32": return .float32
         case "Float64": return .float64
+        case "UUID":
+            return .uuid
+        case "IPv4":
+            return .ipv4
+        case "IPv6":
+            return .ipv6
+        case "Int128":
+            return .int128
+        case "UInt128":
+            return .uint128
+        case "Int256":
+            return .int256
+        case "UInt256":
+            return .uint256
+        case "DateTime":
+            return .dateTime
+        case "Date":
+            return .date
+        case "Date32":
+            return .date32
         default:
+            if inner.hasPrefix("DateTime64(") {
+                return .dateTime64(precision: try parseDateTime64Precision(typeName: inner))
+            }
+            if inner.hasPrefix("DateTime(") {
+                return .dateTime
+            }
+            if inner.hasPrefix("Decimal") {
+                let parameters = try parseDecimalParameters(typeName: inner)
+                return .decimal(precision: parameters.precision, scale: parameters.scale)
+            }
+            if inner.hasPrefix("Enum8(") {
+                return .enum8(mapping: try parseEnumMapping(typeName: inner, prefixCount: "Enum8(".utf8.count))
+            }
+            if inner.hasPrefix("Enum16(") {
+                return .enum16(mapping: try parseEnumMapping(typeName: inner, prefixCount: "Enum16(".utf8.count))
+            }
             if inner.hasPrefix("FixedString(") {
                 return .fixedString(length: try parseFixedStringLength(typeName: inner))
             }
@@ -666,39 +1233,116 @@ public enum ClickHouseCodableDecoder {
         offset: Int,
         limit: Int
     ) throws(ClickHouseError) -> ColumnParseResult {
+        if lowCardinalityInnerTypeName(typeName).hasPrefix("Nullable(") {
+            return try parseNullableLowCardinalityColumn(typeName: typeName, rowCount: rowCount, base: base, offset: offset, limit: limit)
+        }
         let inner = try parseLowCardinalityInner(typeName: typeName)
         if rowCount == 0 {
             return .init(column: .lowCardinality([], inner: inner), nextOffset: offset)
         }
+        let structure = try readLowCardinalityStructure(inner: inner, typeName: typeName, base: base, offset: offset, limit: limit)
+        // A valid LowCardinality column carries exactly one index per row. A
+        // malformed or hostile server can declare an index count below the
+        // block's row count; the resulting short column would then be indexed
+        // out of bounds (a trap) while decoding later rows. Reject the
+        // mismatch here so it surfaces as a typed error, not a crash.
+        guard structure.indices.count == rowCount else {
+            throw .protocolError(stage: "decoder.lowCardinality", message: "index count \(structure.indices.count) does not match block row count \(rowCount) in \(typeName)")
+        }
+        let perRow = structure.indices.map { structure.dictionary[$0] }
+        return .init(column: .lowCardinality(perRow, inner: inner), nextOffset: structure.nextOffset)
+    }
+
+    // LowCardinality(Nullable(String)) reserves dictionary index 0 as the NULL
+    // placeholder, so a key of 0 is a NULL row and every other key resolves to
+    // its dictionary entry. Reading it into a .nullableString column lets the
+    // existing String and String? decode paths handle it like any other nullable
+    // string, without a dedicated LowCardinality-nullable representation.
+    private static func parseNullableLowCardinalityColumn(
+        typeName: String,
+        rowCount: Int,
+        base: UnsafePointer<UInt8>,
+        offset: Int,
+        limit: Int
+    ) throws(ClickHouseError) -> ColumnParseResult {
+        let innerName = lowCardinalityInnerTypeName(typeName)
+        let valueTypeName = String(innerName.dropFirst("Nullable(".count).dropLast())
+        guard valueTypeName == "String" else {
+            throw .protocolError(stage: "decoder.lowCardinality", message: "unsupported LowCardinality inner type \(innerName)")
+        }
+        if rowCount == 0 {
+            return .init(column: .nullableString([]), nextOffset: offset)
+        }
+        let structure = try readLowCardinalityStructure(inner: .string, typeName: typeName, base: base, offset: offset, limit: limit)
+        guard structure.indices.count == rowCount else {
+            throw .protocolError(stage: "decoder.lowCardinality", message: "index count \(structure.indices.count) does not match block row count \(rowCount) in \(typeName)")
+        }
+        let rows = nullableLowCardinalityRows(indices: structure.indices, dictionary: structure.dictionary)
+        return .init(column: .nullableString(rows), nextOffset: structure.nextOffset)
+    }
+
+    private static func nullableLowCardinalityRows(indices: [Int], dictionary: [[UInt8]]) -> [ClickHouseNullable<[UInt8]>] {
+        indices.map { $0 == 0 ? .absent : .present(dictionary[$0]) }
+    }
+
+    private struct LowCardinalityStructure {
+        let dictionary: [[UInt8]]
+        let indices: [Int]
+        let nextOffset: Int
+    }
+
+    // The state prefix (an 8-byte key-version scalar) precedes the dictionary
+    // bulk for a top-level LowCardinality column. Inside Array(LowCardinality),
+    // the prefix is emitted once before the array offsets, so that caller reads
+    // the prefix itself and invokes readLowCardinalityBulk directly.
+    private static func readLowCardinalityStructure(
+        inner: ClickHouseLowCardinalityInner,
+        typeName: String,
+        base: UnsafePointer<UInt8>,
+        offset: Int,
+        limit: Int
+    ) throws(ClickHouseError) -> LowCardinalityStructure {
+        _ = try readUInt64Scalar(base: base, offset: offset, limit: limit)
+        return try readLowCardinalityBulk(inner: inner, typeName: typeName, base: base, offset: offset + 8, limit: limit)
+    }
+
+    private static func readLowCardinalityBulk(
+        inner: ClickHouseLowCardinalityInner,
+        typeName: String,
+        base: UnsafePointer<UInt8>,
+        offset: Int,
+        limit: Int
+    ) throws(ClickHouseError) -> LowCardinalityStructure {
         var cursor = offset
-        _ = try readUInt64Scalar(base: base, offset: cursor, limit: limit)
-        cursor += 8
         let serializationType = try readUInt64Scalar(base: base, offset: cursor, limit: limit)
         cursor += 8
-        let width = lowCardinalityKeyWidth(serializationType: serializationType)
-        let dictionarySize = Int(try readUInt64Scalar(base: base, offset: cursor, limit: limit))
+        let width = ClickHouseLowCardinalityWire.keyWidth(serializationType: serializationType)
+        let dictionarySize = try boundedElementCount(readUInt64Scalar(base: base, offset: cursor, limit: limit), available: limit - cursor - 8, typeName: typeName, stage: "decoder.lowCardinality")
         cursor += 8
         let dictionaryResult = try readLowCardinalityDictionary(inner: inner, dictionarySize: dictionarySize, base: base, offset: cursor, limit: limit)
         cursor = dictionaryResult.nextOffset
-        let indicesCount = Int(try readUInt64Scalar(base: base, offset: cursor, limit: limit))
+        let indicesCount = try boundedElementCount(readUInt64Scalar(base: base, offset: cursor, limit: limit), available: limit - cursor - 8, typeName: typeName, stage: "decoder.lowCardinality")
         cursor += 8
-        let perRow = try readLowCardinalityIndices(count: indicesCount, width: width, dictionary: dictionaryResult.dictionary, base: base, offset: cursor, limit: limit, typeName: typeName)
+        let indices = try readLowCardinalityRawIndices(count: indicesCount, width: width, dictionarySize: dictionaryResult.dictionary.count, base: base, offset: cursor, limit: limit, typeName: typeName)
         cursor += indicesCount * width
-        return .init(column: .lowCardinality(perRow, inner: inner), nextOffset: cursor)
+        return LowCardinalityStructure(dictionary: dictionaryResult.dictionary, indices: indices, nextOffset: cursor)
+    }
+
+    // Converts a server-supplied element/offset count to an Int, rejecting a
+    // value above Int (an unchecked Int(UInt64) conversion would trap) or one
+    // larger than the bytes remaining (each element occupies at least one
+    // byte, so a count exceeding the available bytes is malformed and would
+    // otherwise drive an absurd allocation).
+    private static func boundedElementCount(_ raw: UInt64, available: Int, typeName: String, stage: String) throws(ClickHouseError) -> Int {
+        guard let count = Int(exactly: raw), count <= Swift.max(0, available) else {
+            throw .protocolError(stage: stage, message: "element count \(raw) exceeds the \(Swift.max(0, available)) bytes available in \(typeName)")
+        }
+        return count
     }
 
     private static func readUInt64Scalar(base: UnsafePointer<UInt8>, offset: Int, limit: Int) throws(ClickHouseError) -> UInt64 {
         let values: [UInt64] = try parseFixedWidth(rowCount: 1, base: base, offset: offset, limit: limit, typeName: "LowCardinality")
         return values[0]
-    }
-
-    private static func lowCardinalityKeyWidth(serializationType: UInt64) -> Int {
-        switch serializationType & 0xFF {
-        case 0: return 1
-        case 1: return 2
-        case 2: return 4
-        default: return 8
-        }
     }
 
     private struct LowCardinalityDictionaryResult {
@@ -715,8 +1359,8 @@ public enum ClickHouseCodableDecoder {
     ) throws(ClickHouseError) -> LowCardinalityDictionaryResult {
         switch inner {
         case .string:
-            let (strings, consumed) = try parseStringColumn(rowCount: dictionarySize, base: base, offset: offset, limit: limit)
-            return LowCardinalityDictionaryResult(dictionary: strings.map { Array($0.utf8) }, nextOffset: offset + consumed)
+            let (byteStrings, consumed) = try parseStringColumn(rowCount: dictionarySize, base: base, offset: offset, limit: limit)
+            return LowCardinalityDictionaryResult(dictionary: byteStrings, nextOffset: offset + consumed)
         case .fixedString(let length):
             return try readLowCardinalityFixedDictionary(dictionarySize: dictionarySize, length: length, base: base, offset: offset, limit: limit)
         }
@@ -744,26 +1388,26 @@ public enum ClickHouseCodableDecoder {
         return LowCardinalityDictionaryResult(dictionary: dictionary, nextOffset: offset + dictionarySize * length)
     }
 
-    private static func readLowCardinalityIndices(
+    private static func readLowCardinalityRawIndices(
         count: Int,
         width: Int,
-        dictionary: [[UInt8]],
+        dictionarySize: Int,
         base: UnsafePointer<UInt8>,
         offset: Int,
         limit: Int,
         typeName: String
-    ) throws(ClickHouseError) -> [[UInt8]] {
+    ) throws(ClickHouseError) -> [Int] {
         try requireBytes(count * width, available: limit - offset, typeName: typeName)
-        var perRow: [[UInt8]] = []
-        perRow.reserveCapacity(count)
+        var indices: [Int] = []
+        indices.reserveCapacity(count)
         for index in 0..<count {
             let dictionaryIndex = readLittleEndianIndex(base: base, offset: offset + index * width, width: width)
-            if dictionaryIndex < 0 || dictionaryIndex >= dictionary.count {
-                throw .protocolError(stage: "decoder.lowCardinality", message: "index \(dictionaryIndex) out of dictionary range \(dictionary.count) in \(typeName)")
+            if dictionaryIndex < 0 || dictionaryIndex >= dictionarySize {
+                throw .protocolError(stage: "decoder.lowCardinality", message: "index \(dictionaryIndex) out of dictionary range \(dictionarySize) in \(typeName)")
             }
-            perRow.append(dictionary[dictionaryIndex])
+            indices.append(dictionaryIndex)
         }
-        return perRow
+        return indices
     }
 
     private static func readLittleEndianIndex(base: UnsafePointer<UInt8>, offset: Int, width: Int) -> Int {
@@ -774,8 +1418,12 @@ public enum ClickHouseCodableDecoder {
         return Int(truncatingIfNeeded: value)
     }
 
+    private static func lowCardinalityInnerTypeName(_ typeName: String) -> String {
+        String(typeName.dropFirst("LowCardinality(".count).dropLast())
+    }
+
     private static func parseLowCardinalityInner(typeName: String) throws(ClickHouseError) -> ClickHouseLowCardinalityInner {
-        let inner = String(typeName.dropFirst("LowCardinality(".count).dropLast())
+        let inner = lowCardinalityInnerTypeName(typeName)
         if inner == "String" {
             return .string
         }
@@ -851,7 +1499,13 @@ public enum ClickHouseCodableDecoder {
         }
         var cursor = offset + 1
         var nameBytes: [UInt8] = []
-        while cursor < bytes.count, bytes[cursor] != 0x27 {
+        while cursor < bytes.count {
+            if bytes[cursor] == 0x5c, cursor + 1 < bytes.count {
+                nameBytes.append(bytes[cursor + 1])
+                cursor += 2
+                continue
+            }
+            if bytes[cursor] == 0x27 { break }
             nameBytes.append(bytes[cursor])
             cursor += 1
         }
@@ -925,7 +1579,7 @@ public enum ClickHouseCodableDecoder {
         return .init(column: .fixedString(values, length: length), nextOffset: offset + rowCount * length)
     }
 
-    private static func parseFixedStringLength(typeName: String) throws(ClickHouseError) -> Int {
+    package static func parseFixedStringLength(typeName: String) throws(ClickHouseError) -> Int {
         let inner = typeName.dropFirst("FixedString(".count)
         var value = 0
         var digitCount = 0
@@ -1012,7 +1666,7 @@ public enum ClickHouseCodableDecoder {
         return (UInt64(littleEndian: limbs.0), UInt64(littleEndian: limbs.1), UInt64(littleEndian: limbs.2), UInt64(littleEndian: limbs.3))
     }
 
-    private static func parseDecimalParameters(typeName: String) throws(ClickHouseError) -> (precision: UInt8, scale: UInt8) {
+    package static func parseDecimalParameters(typeName: String) throws(ClickHouseError) -> (precision: UInt8, scale: UInt8) {
         if typeName.hasPrefix("Decimal(") {
             return try parseDecimalAlias(typeName: typeName)
         }
@@ -1046,6 +1700,9 @@ public enum ClickHouseCodableDecoder {
         if scaleScan.digitCount == 0 {
             throw .protocolError(stage: "decoder.decimal", message: "missing scale in \(typeName)")
         }
+        if scaleScan.value > 76 {
+            throw .protocolError(stage: "decoder.decimal", message: "scale out of range in \(typeName)")
+        }
         return (UInt8(precisionScan.value), UInt8(scaleScan.value))
     }
 
@@ -1054,6 +1711,9 @@ public enum ClickHouseCodableDecoder {
         let scan = scanDecimalInteger(inner)
         if scan.digitCount == 0 {
             throw .protocolError(stage: "decoder.decimal", message: "missing scale in \(typeName)")
+        }
+        if scan.value > 76 {
+            throw .protocolError(stage: "decoder.decimal", message: "scale out of range in \(typeName)")
         }
         return UInt8(scan.value)
     }
@@ -1130,15 +1790,15 @@ public enum ClickHouseCodableDecoder {
         base: UnsafePointer<UInt8>,
         offset: Int,
         limit: Int
-    ) throws(ClickHouseError) -> ([String], Int) {
-        var values: [String] = []
+    ) throws(ClickHouseError) -> ([[UInt8]], Int) {
+        var values: [[UInt8]] = []
         values.reserveCapacity(rowCount)
         var cursor = offset
         for _ in 0..<rowCount {
             do {
-                let parsed = try ClickHouseWire.readString(base: base, offset: cursor, limit: limit)
-                values.append(parsed.0)
-                cursor += parsed.1
+                let (slice, consumed) = try ClickHouseWire.readStringSlice(base: base, offset: cursor, limit: limit)
+                values.append(Array(slice))
+                cursor += consumed
             } catch {
                 throw .protocolError(stage: "decoder.parseStringColumn", message: "\(error)")
             }

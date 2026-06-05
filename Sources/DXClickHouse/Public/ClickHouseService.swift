@@ -78,7 +78,7 @@ public actor ClickHouseService: Service {
     // completes) and a deadline timer. When the deadline wins, `close()`
     // still runs; queued work surfaces a typed I/O error to its caller
     // once the socket is gone.
-    private func drainThenClose() async {
+    func drainThenClose() async {
         let grace = configuration.shutdownGracePeriod
         let logger = configuration.logger
         let client = self.client
@@ -97,7 +97,11 @@ public actor ClickHouseService: Service {
             case .gracePeriodElapsed:
                 logger.warning("ClickHouseService grace period elapsed; closing connection regardless")
                 group.cancelAll()
-                await client.close()
+                // forceClose, not close: a graceful close enqueues behind
+                // the serial worker and would never run while a query is
+                // stuck in recv, so the grace period would not bound
+                // shutdown at all.
+                await client.forceClose()
             case .none:
                 break
             }

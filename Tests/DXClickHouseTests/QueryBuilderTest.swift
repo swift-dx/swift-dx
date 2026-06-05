@@ -146,17 +146,27 @@ struct ClickHouseQueryBuilderTest {
         #expect(withParameter.count == empty.count + 7)
     }
 
-    @Test("buildQuery on older revisions skips parameter emission entirely")
-    func parametersSkippedOnOldRevision() throws {
-        let withParameter = try ClickHouseQueryBuilder.buildQuery(
-            "SELECT 1",
-            queryID: "",
-            settings: .empty,
-            parameters: ClickHouseQueryParameters([
-                ClickHouseQueryParameter(name: "id", value: "42"),
-            ]),
-            revision: 54_000
-        )
+    @Test("buildQuery on older revisions rejects bound parameters rather than dropping them")
+    func parametersRejectedOnOldRevision() {
+        var threw = false
+        do {
+            _ = try ClickHouseQueryBuilder.buildQuery(
+                "SELECT 1",
+                queryID: "",
+                settings: .empty,
+                parameters: ClickHouseQueryParameters([
+                    ClickHouseQueryParameter(name: "id", value: "42"),
+                ]),
+                revision: 54_000
+            )
+        } catch {
+            threw = true
+        }
+        #expect(threw)
+    }
+
+    @Test("buildQuery on older revisions still builds when there are no parameters to bind")
+    func noParametersBuildsOnOldRevision() throws {
         let withoutParameter = try ClickHouseQueryBuilder.buildQuery(
             "SELECT 1",
             queryID: "",
@@ -164,7 +174,61 @@ struct ClickHouseQueryBuilderTest {
             parameters: .empty,
             revision: 54_000
         )
-        #expect(withParameter.count == withoutParameter.count)
+        #expect(!withoutParameter.isEmpty)
+    }
+
+    private func build(at revision: UInt64) throws -> [UInt8] {
+        try ClickHouseQueryBuilder.buildQuery(
+            "SELECT 1",
+            queryID: "",
+            settings: .empty,
+            parameters: .empty,
+            revision: revision
+        )
+    }
+
+    @Test("clientInfo fields are gated by the negotiated revision, not emitted unconditionally")
+    func clientInfoIsRevisionGated() throws {
+        // Both revisions sit above the parameters-block gate (54_459), so the
+        // only thing that can differ is the clientInfo / roles gating itself:
+        // externallyGrantedRoles (54_472), queryNumberOfRows and
+        // queryNumberOfLines (54_475), and haveJWT (54_476). This isolates
+        // the clientInfo gate from the pre-existing parameters gate.
+        let older = try build(at: 54_460)
+        let current = try build(at: ClickHouseQueryBuilder.revision)
+        #expect(current.count - older.count == 4)
+    }
+
+    @Test("query packet size grows monotonically as the negotiated revision rises")
+    func querySizeGrowsWithRevision() throws {
+        let low = try build(at: 54_400)
+        let middle = try build(at: 54_450)
+        let high = try build(at: ClickHouseQueryBuilder.revision)
+        #expect(low.count <= middle.count)
+        #expect(middle.count <= high.count)
+    }
+
+    @Test("no field is gated above the client revision, so the field count is stable above it")
+    func noFieldGatedAboveClientRevision() throws {
+        // Byte-equality would fail because the negotiated revision is itself
+        // embedded as the clientTcpProtocolVersion field; both values here
+        // encode to a 3-byte varint, so the packet length is identical.
+        let atClient = try build(at: ClickHouseQueryBuilder.revision)
+        let aboveClient = try build(at: ClickHouseQueryBuilder.revision + 100)
+        #expect(atClient.count == aboveClient.count)
+    }
+
+    @Test("a revision below every clientInfo gate skips exactly the introduced-later fields")
+    func gatedFieldsAccountForExactByteDelta() throws {
+        let older = try build(at: 54_440)
+        let current = try build(at: ClickHouseQueryBuilder.revision)
+        // Fields introduced in (54_440, 54_478] and skipped at 54_440:
+        // interserverSecret 54441 (1) + trace 54442 (1) + distributedDepth
+        // 54448 (1) + initialQueryStartTime 54449 (8) + parallelReplicas
+        // 54453 (3) + parameters-block terminator 54459 (1) +
+        // externallyGrantedRoles 54472 (1) + queryNumberOfRows and
+        // queryNumberOfLines 54475 (2) + haveJWT 54476 (1) = 19 bytes.
+        #expect(current.count - older.count == 19)
     }
 }
 

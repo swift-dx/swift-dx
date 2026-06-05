@@ -50,8 +50,16 @@ public struct ClickHouseArray: Sendable, Hashable, Codable {
         ClickHouseArray(element: .float64, elements: values.map { littleEndianBytes($0.bitPattern) })
     }
 
+    public static func bools(_ values: [Bool]) -> ClickHouseArray {
+        ClickHouseArray(element: .bool, elements: values.map { [$0 ? 1 : 0] })
+    }
+
     public var strings: [String] {
         elements.map { String(decoding: $0, as: UTF8.self) }
+    }
+
+    public var bools: [Bool] {
+        elements.map { ($0.first ?? 0) != 0 }
     }
 
     private static func littleEndianBytes<T: FixedWidthInteger>(_ value: T) -> [UInt8] {

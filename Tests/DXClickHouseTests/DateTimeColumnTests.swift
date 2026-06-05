@@ -104,4 +104,59 @@ struct ClickHouseDateTimeColumnTests {
         }
         return false
     }
+
+    struct EventRow: Codable, Sendable, Equatable {
+        let occurredAt: Date
+    }
+
+    private enum EncodeOutcome: Sendable, Equatable {
+        case succeeded
+        case rejected(stage: String)
+        case otherError(String)
+    }
+
+    private static func encodeOutcome(of row: EventRow) -> EncodeOutcome {
+        do {
+            _ = try ClickHouseRowEncoder().encode([row])
+            return .succeeded
+        } catch let error {
+            if case .protocolError(let stage, _) = error { return .rejected(stage: stage) }
+            return .otherError(String(describing: error))
+        }
+    }
+
+    @Test("encoder rejects a pre-1970 DateTime instead of silently clamping to the epoch")
+    func rejectsPre1970DateTime() {
+        let outcome = Self.encodeOutcome(of: EventRow(occurredAt: Date(timeIntervalSince1970: -100)))
+        #expect(outcome == .rejected(stage: "encoder.dateTime"))
+    }
+
+    @Test("encoder rejects a post-2106 DateTime instead of silently clamping to the maximum")
+    func rejectsPost2106DateTime() {
+        let outcome = Self.encodeOutcome(of: EventRow(occurredAt: Date(timeIntervalSince1970: 5_000_000_000)))
+        #expect(outcome == .rejected(stage: "encoder.dateTime"))
+    }
+
+    @Test("encoder accepts an in-range DateTime")
+    func acceptsInRangeDateTime() {
+        let outcome = Self.encodeOutcome(of: EventRow(occurredAt: Date(timeIntervalSince1970: 1_700_000_000)))
+        #expect(outcome == .succeeded)
+    }
+
+    @Test("block writer rejects an out-of-range DateTime column instead of clamping")
+    func blockWriterRejectsOutOfRangeDateTime() {
+        let columns: [ClickHouseNamedColumn] = [
+            ClickHouseNamedColumn(name: "occurredAt", column: .dateTime([Date(timeIntervalSince1970: -100)])),
+        ]
+        var stage = "none"
+        do {
+            _ = try ClickHouseBlockWriter.encodeDataPacket(
+                columns: columns,
+                revision: ClickHouseBlockWriter.revisionWithCustomSerialization
+            )
+        } catch let error {
+            if case .protocolError(let caught, _) = error { stage = caught }
+        }
+        #expect(stage == "blockWriter.dateTime")
+    }
 }

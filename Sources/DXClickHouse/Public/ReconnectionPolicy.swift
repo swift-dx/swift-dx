@@ -18,6 +18,14 @@
 /// ``maxAttempts`` times before bubbling
 /// `ClickHouseError.reconnectExhausted` to the caller.
 ///
+/// Each sleep is randomized within the upper half of its nominal backoff
+/// (equal jitter: the wait lands between half and the full backoff) so a
+/// fleet of connections that all dropped at the same instant do not retry
+/// in lockstep and stampede the broker the moment it recovers. The
+/// ``initialBackoff``/``maxBackoff``/``backoffMultiplier`` values define
+/// the growth envelope; the jitter only spreads each individual wait
+/// inside that envelope.
+///
 /// ## Default
 ///
 /// The default value is ``alwaysRetry``: a connection keeps trying to
@@ -63,6 +71,12 @@ public struct ReconnectionPolicy: Sendable, Equatable {
     public let initialBackoff: Duration
     public let maxBackoff: Duration
     public let backoffMultiplier: Double
+
+    /// Upper bound on a single connect handshake. A server that accepts
+    /// the TCP connection but never answers the Hello would otherwise park
+    /// the handshake recv forever; this bounds each attempt so connect
+    /// fails (or moves to the next reconnect attempt) instead of hanging.
+    public let handshakeTimeout: Duration
 
     /// Library default. Always-retry-with-exponential-backoff: 100ms
     /// initial backoff, doubling each attempt up to a 5-second cap, no
@@ -117,11 +131,13 @@ public struct ReconnectionPolicy: Sendable, Equatable {
         maxAttempts: Int,
         initialBackoff: Duration,
         maxBackoff: Duration,
-        backoffMultiplier: Double = 2.0
+        backoffMultiplier: Double = 2.0,
+        handshakeTimeout: Duration = .seconds(10)
     ) {
         self.maxAttempts = maxAttempts
         self.initialBackoff = initialBackoff
         self.maxBackoff = maxBackoff
         self.backoffMultiplier = backoffMultiplier
+        self.handshakeTimeout = handshakeTimeout
     }
 }

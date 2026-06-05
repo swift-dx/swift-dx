@@ -19,4 +19,21 @@ public struct ClickHouseTime: Sendable, Hashable, Codable {
     public init(seconds: Int32) {
         self.seconds = seconds
     }
+
+    // Builds the seconds count from a Swift Duration. The Time column is
+    // second-resolution, so any sub-second part of the Duration is dropped.
+    // Throws for durations whose whole-second magnitude exceeds the Int32
+    // range a Time column can hold.
+    public init(_ duration: Duration) throws(ClickHouseError) {
+        let seconds = duration.components.seconds
+        guard (Int64(Int32.min)...Int64(Int32.max)).contains(seconds) else {
+            throw .protocolError(stage: "time", message: "duration \(duration) is outside the Time range (\(Int32.min)...\(Int32.max) seconds)")
+        }
+        self.seconds = Int32(seconds)
+    }
+
+    // The signed elapsed time this value represents, as a Swift Duration.
+    public var duration: Duration {
+        .seconds(Int64(seconds))
+    }
 }

@@ -27,10 +27,17 @@ import Foundation
 //
 // The cases are ordered to keep related variants together so adding a
 // new scalar type touches one bucket only.
-public enum ClickHouseTypedColumn: Sendable {
+package enum ClickHouseTypedColumn: Sendable {
 
-    case string([String])
-    case nullableString([ClickHouseNullable<String>])
+    case string([[UInt8]])
+    // Encode-only String column carrying native Swift strings, serialized by
+    // streaming each value's utf8 view straight to the wire. The `.string`
+    // ([[UInt8]]) variant is what decode produces and forces every value into a
+    // separate heap array up front; for the columnar insert fast path that
+    // materialization is the dominant cost, so this variant defers it. Both
+    // serialize to the identical String wire format.
+    case stringValues([String])
+    case nullableString([ClickHouseNullable<[UInt8]>])
 
     case bool([Bool])
     case nullableBool([ClickHouseNullable<Bool>])
@@ -90,7 +97,15 @@ public enum ClickHouseTypedColumn: Sendable {
 
     case map(keys: [[[UInt8]]], values: [[[UInt8]]], keyElement: ClickHouseArrayElementType, valueElement: ClickHouseArrayElementType)
 
-    case arrayOfTuple(firstValues: [[[UInt8]]], secondValues: [[[UInt8]]], firstElement: ClickHouseArrayElementType, secondElement: ClickHouseArrayElementType)
+    case mapWithNullableValues(keys: [[[UInt8]]], values: [[ClickHouseNullable<[UInt8]>]], keyElement: ClickHouseArrayElementType, valueElement: ClickHouseArrayElementType)
+
+    case mapWithArrayValues(keys: [[[UInt8]]], values: [[[[UInt8]]]], keyElement: ClickHouseArrayElementType, valueElement: ClickHouseArrayElementType)
+
+    case arrayOfTuple(elementValues: [[[[UInt8]]]], elements: [ClickHouseArrayElementType], names: [String])
+
+    case arrayOfNullable(perRow: [[ClickHouseNullable<[UInt8]>]], element: ClickHouseArrayElementType)
+
+    case nestedArray(perRow: [[[[UInt8]]]], element: ClickHouseArrayElementType)
 
     case variant(members: [ClickHouseArrayElementType], discriminators: [UInt8], values: [[UInt8]])
 
@@ -100,9 +115,31 @@ public enum ClickHouseTypedColumn: Sendable {
 
     indirect case nullable(mask: [Bool], inner: ClickHouseTypedColumn)
 
-    public var rowCount: Int {
+    package func isNull(at row: Int) -> Bool {
+        switch self {
+        case .nullableBool(let values): values[row].isAbsent
+        case .nullableString(let values): values[row].isAbsent
+        case .nullableInt8(let values): values[row].isAbsent
+        case .nullableInt16(let values): values[row].isAbsent
+        case .nullableInt32(let values): values[row].isAbsent
+        case .nullableInt64(let values): values[row].isAbsent
+        case .nullableUInt8(let values): values[row].isAbsent
+        case .nullableUInt16(let values): values[row].isAbsent
+        case .nullableUInt32(let values): values[row].isAbsent
+        case .nullableUInt64(let values): values[row].isAbsent
+        case .nullableFloat32(let values): values[row].isAbsent
+        case .nullableFloat64(let values): values[row].isAbsent
+        case .nullableDateTime(let values): values[row].isAbsent
+        case .nullableUUID(let values): values[row].isAbsent
+        case .nullable(let mask, _): mask[row]
+        default: false
+        }
+    }
+
+    package var rowCount: Int {
         switch self {
         case .string(let values): values.count
+        case .stringValues(let values): values.count
         case .nullableString(let values): values.count
         case .bool(let values): values.count
         case .nullableBool(let values): values.count
@@ -153,7 +190,11 @@ public enum ClickHouseTypedColumn: Sendable {
         case .nothing(let rowCount): rowCount
         case .tuple(let columns, _): Self.tupleRowCount(columns)
         case .map(let keys, _, _, _): keys.count
-        case .arrayOfTuple(let firstValues, _, _, _): firstValues.count
+        case .mapWithNullableValues(let keys, _, _, _): keys.count
+        case .mapWithArrayValues(let keys, _, _, _): keys.count
+        case .arrayOfTuple(let elementValues, _, _): elementValues.isEmpty ? 0 : elementValues[0].count
+        case .arrayOfNullable(let perRow, _): perRow.count
+        case .nestedArray(let perRow, _): perRow.count
         case .variant(_, let discriminators, _): discriminators.count
         case .dynamic(_, let discriminators, _): discriminators.count
         case .aggregateFunction(_, let states): states.count
@@ -166,9 +207,10 @@ public enum ClickHouseTypedColumn: Sendable {
         return first.rowCount
     }
 
-    public var typeName: String {
+    package var typeName: String {
         switch self {
         case .string: "String"
+        case .stringValues: "String"
         case .nullableString: "Nullable(String)"
         case .bool: "Bool"
         case .nullableBool: "Nullable(Bool)"
@@ -219,7 +261,11 @@ public enum ClickHouseTypedColumn: Sendable {
         case .nothing: "Nothing"
         case .tuple(let columns, let names): "Tuple(\(ClickHouseTupleTypeName.render(columns: columns, names: names)))"
         case .map(_, _, let keyElement, let valueElement): "Map(\(keyElement.typeName), \(valueElement.typeName))"
-        case .arrayOfTuple(_, _, let firstElement, let secondElement): "Array(Tuple(\(firstElement.typeName), \(secondElement.typeName)))"
+        case .mapWithNullableValues(_, _, let keyElement, let valueElement): "Map(\(keyElement.typeName), Nullable(\(valueElement.typeName)))"
+        case .mapWithArrayValues(_, _, let keyElement, let valueElement): "Map(\(keyElement.typeName), Array(\(valueElement.typeName)))"
+        case .arrayOfTuple(_, let elements, _): "Array(Tuple(\(elements.map(\.typeName).joined(separator: ", "))))"
+        case .arrayOfNullable(_, let element): "Array(Nullable(\(element.typeName)))"
+        case .nestedArray(_, let element): "Array(Array(\(element.typeName)))"
         case .variant(let members, _, _): "Variant(\(ClickHouseVariantTypeName.render(members)))"
         case .dynamic: "Dynamic"
         case .aggregateFunction(let signature, _): "AggregateFunction(\(signature))"

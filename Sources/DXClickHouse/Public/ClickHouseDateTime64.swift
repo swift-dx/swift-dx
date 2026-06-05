@@ -30,9 +30,28 @@ public struct ClickHouseDateTime64: Sendable, Hashable, Codable {
     // a `Double` seconds value, ticks beyond `Date`'s own resolution
     // (roughly sub-microsecond for present-day instants) are not exact;
     // for true nanosecond fidelity supply an `Int64` via init(ticks:).
-    public init(_ date: Date, precision: UInt8 = 9) {
+    //
+    // Throws rather than trapping when the date and precision do not fit
+    // the Int64 tick domain: a far-future or far-past date at high
+    // precision, or an out-of-range precision, would otherwise overflow
+    // the Int64 conversion and crash the process inside a public
+    // initializer.
+    public init(_ date: Date, precision: UInt8 = 9) throws(ClickHouseError) {
+        guard precision <= 18 else {
+            throw .protocolError(
+                stage: "dateTime64",
+                message: "DateTime64 precision \(precision) exceeds the maximum of 18"
+            )
+        }
         let scale = pow(10.0, Double(precision))
-        self.ticks = Int64((date.timeIntervalSince1970 * scale).rounded())
+        let raw = (date.timeIntervalSince1970 * scale).rounded()
+        guard raw.isFinite, raw >= Double(Int64.min), raw < Double(Int64.max) else {
+            throw .protocolError(
+                stage: "dateTime64",
+                message: "date at precision \(precision) is outside the representable DateTime64 tick range"
+            )
+        }
+        self.ticks = Int64(raw)
         self.precision = precision
     }
 

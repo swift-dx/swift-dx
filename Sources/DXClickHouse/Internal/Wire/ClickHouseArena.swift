@@ -69,7 +69,11 @@ public struct ClickHouseArena {
         }
         let remaining = tail - head
         let base = owner.base
-        base.update(from: base + head, count: remaining)
+        // memmove, not update(from:count:): the destination [0, remaining)
+        // and the source [head, tail) overlap whenever tail > 2*head, which
+        // is routine on a large drain. update()'s contract forbids
+        // overlapping regions, so memmove is the correct overlap-safe slide.
+        _ = memmove(base, base + head, remaining)
         head = 0
         tail = remaining
     }

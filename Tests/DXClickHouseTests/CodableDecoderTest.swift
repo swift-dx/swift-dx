@@ -32,7 +32,7 @@ struct ClickHouseColumnarDecoderTest {
     func decodesBasicRows() throws {
         let columns = [
             ClickHouseNamedColumn(name: "id", column: .uint64([100, 200])),
-            ClickHouseNamedColumn(name: "name", column: .string(["alpha", "beta"])),
+            ClickHouseNamedColumn(name: "name", column: .string([Array("alpha".utf8), Array("beta".utf8)])),
             ClickHouseNamedColumn(name: "score", column: .float64([1.5, 2.5])),
         ]
         let rows: [Row] = try ClickHouseCodableDecoder.decodeRows(
@@ -50,7 +50,7 @@ struct ClickHouseColumnarDecoderTest {
     func decodesNullableColumns() throws {
         let columns = [
             ClickHouseNamedColumn(name: "id", column: .uint64([1, 2])),
-            ClickHouseNamedColumn(name: "label", column: .nullableString([.present("hello"), .absent])),
+            ClickHouseNamedColumn(name: "label", column: .nullableString([.present(Array("hello".utf8)), .absent])),
             ClickHouseNamedColumn(name: "count", column: .nullableInt32([.present(42), .absent])),
         ]
         let rows: [OptRow] = try ClickHouseCodableDecoder.decodeRows(

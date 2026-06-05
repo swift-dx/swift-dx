@@ -42,6 +42,12 @@ public struct ClickHouseConfiguration: Sendable {
     public let shutdownGracePeriod: Duration
     public let logger: Logger
 
+    // Multi-endpoint constructor. An empty endpoints list cannot produce a
+    // usable configuration — the connection layer reads the first endpoint
+    // to dial — so it is rejected with a typed error at the boundary rather
+    // than trapping the process. Building the list dynamically (service
+    // discovery, environment parsing) that resolves to nothing is a
+    // recoverable application condition, not a programmer invariant.
     public init(
         endpoints: [ClickHouseEndpoint],
         user: String = "default",
@@ -49,16 +55,26 @@ public struct ClickHouseConfiguration: Sendable {
         database: String = "default",
         shutdownGracePeriod: Duration = .seconds(30),
         logger: Logger = Logger(label: "swift-dx.clickhouse", factory: { _ in SwiftLogNoOpLogHandler() })
-    ) {
-        precondition(!endpoints.isEmpty, "ClickHouseConfiguration requires at least one endpoint")
-        self.endpoints = endpoints
-        self.user = user
-        self.password = password
-        self.database = database
-        self.shutdownGracePeriod = shutdownGracePeriod
-        self.logger = logger
+    ) throws(ClickHouseError) {
+        guard !endpoints.isEmpty else {
+            throw .protocolError(
+                stage: "configuration",
+                message: "ClickHouseConfiguration requires at least one endpoint; the endpoints list was empty"
+            )
+        }
+        self.init(
+            validatedEndpoints: endpoints,
+            user: user,
+            password: password,
+            database: database,
+            shutdownGracePeriod: shutdownGracePeriod,
+            logger: logger
+        )
     }
 
+    // Single-endpoint convenience. A host/port pair always yields exactly
+    // one endpoint, so this form cannot reach the empty-list state and
+    // stays non-throwing.
     public init(
         host: String,
         port: Int,
@@ -69,12 +85,28 @@ public struct ClickHouseConfiguration: Sendable {
         logger: Logger = Logger(label: "swift-dx.clickhouse", factory: { _ in SwiftLogNoOpLogHandler() })
     ) {
         self.init(
-            endpoints: [ClickHouseEndpoint(host: host, port: port)],
+            validatedEndpoints: [ClickHouseEndpoint(host: host, port: port)],
             user: user,
             password: password,
             database: database,
             shutdownGracePeriod: shutdownGracePeriod,
             logger: logger
         )
+    }
+
+    private init(
+        validatedEndpoints: [ClickHouseEndpoint],
+        user: String,
+        password: String,
+        database: String,
+        shutdownGracePeriod: Duration,
+        logger: Logger
+    ) {
+        self.endpoints = validatedEndpoints
+        self.user = user
+        self.password = password
+        self.database = database
+        self.shutdownGracePeriod = shutdownGracePeriod
+        self.logger = logger
     }
 }

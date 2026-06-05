@@ -40,12 +40,13 @@ extension ClickHouseClient {
     public func execute(
         _ sql: String,
         timeout: Duration = ClickHouseQueryDefaults.selectTimeout,
-        settings: ClickHouseQuerySettings = .empty
+        settings: ClickHouseQuerySettings = .empty,
+        parameters: ClickHouseQueryParameters = .empty
     ) async throws(ClickHouseError) {
         let injected = Self.injectMaxExecutionTime(into: settings, timeout: timeout)
         let captured = self
         _ = try await Self.withTimeout(self, timeout: timeout) { () -> Int in
-            try await captured.executeInternal(sql: sql, settings: injected)
+            try await captured.executeInternal(sql: sql, settings: injected, parameters: parameters)
             return 0
         }
     }
@@ -53,9 +54,10 @@ extension ClickHouseClient {
     public func execute(
         _ sqlBytes: [UInt8],
         timeout: Duration = ClickHouseQueryDefaults.selectTimeout,
-        settings: ClickHouseQuerySettings = .empty
+        settings: ClickHouseQuerySettings = .empty,
+        parameters: ClickHouseQueryParameters = .empty
     ) async throws(ClickHouseError) {
-        try await execute(Self.decodeSQLBytes(sqlBytes), timeout: timeout, settings: settings)
+        try await execute(Self.decodeSQLBytes(sqlBytes), timeout: timeout, settings: settings, parameters: parameters)
     }
 
     public func ping(
@@ -70,11 +72,12 @@ extension ClickHouseClient {
         _ sql: String,
         as type: T.Type,
         timeout: Duration = ClickHouseQueryDefaults.selectTimeout,
-        settings: ClickHouseQuerySettings = .empty
+        settings: ClickHouseQuerySettings = .empty,
+        parameters: ClickHouseQueryParameters = .empty
     ) async throws(ClickHouseError) -> T {
         let injected = Self.injectMaxExecutionTime(into: settings, timeout: timeout)
         return try await Self.withTimeout(self, timeout: timeout) {
-            try await self.scalarInternal(sql: sql, type: type, settings: injected)
+            try await self.scalarInternal(sql: sql, type: type, settings: injected, parameters: parameters)
         }
     }
 
@@ -82,9 +85,10 @@ extension ClickHouseClient {
         _ sqlBytes: [UInt8],
         as type: T.Type,
         timeout: Duration = ClickHouseQueryDefaults.selectTimeout,
-        settings: ClickHouseQuerySettings = .empty
+        settings: ClickHouseQuerySettings = .empty,
+        parameters: ClickHouseQueryParameters = .empty
     ) async throws(ClickHouseError) -> T {
-        try await scalar(Self.decodeSQLBytes(sqlBytes), as: type, timeout: timeout, settings: settings)
+        try await scalar(Self.decodeSQLBytes(sqlBytes), as: type, timeout: timeout, settings: settings, parameters: parameters)
     }
 
     public func selectAll<T: Decodable & Sendable>(
@@ -103,6 +107,66 @@ extension ClickHouseClient {
                 parameters: parameters
             )
         }
+    }
+
+    // Runs any query and returns its columns directly — no Codable type, no
+    // conformance. The thin, protocol-close read: issue SQL, read columns by
+    // name and row. selectAll / selectAllFused are typed conveniences on top.
+    public func query(
+        _ sql: String,
+        timeout: Duration = ClickHouseQueryDefaults.selectTimeout,
+        settings: ClickHouseQuerySettings = .empty,
+        parameters: ClickHouseQueryParameters = .empty
+    ) async throws(ClickHouseError) -> ClickHouseQueryResult {
+        let injected = Self.injectMaxExecutionTime(into: settings, timeout: timeout)
+        return try await Self.withTimeout(self, timeout: timeout) {
+            try await self.collectQuery(sql: sql, settings: injected, parameters: parameters)
+        }
+    }
+
+    // Fused fast-path read: single-pass decode straight from the received
+    // bytes, no intermediate typed-column arrays. Lowest-overhead read.
+    public func selectAllFused<T: ClickHouseFusedDecodable & Sendable>(
+        _ sql: String,
+        as type: T.Type,
+        timeout: Duration = ClickHouseQueryDefaults.selectTimeout,
+        settings: ClickHouseQuerySettings = .empty,
+        parameters: ClickHouseQueryParameters = .empty
+    ) async throws(ClickHouseError) -> [T] {
+        let injected = Self.injectMaxExecutionTime(into: settings, timeout: timeout)
+        return try await Self.withTimeout(self, timeout: timeout) {
+            try await self.collectFused(sql: sql, settings: injected, parameters: parameters)
+        }
+    }
+
+    // Columnar fast-path equivalent of `selectAll` for a ClickHouseRowDecodable
+    // destination: same materialised array, decoded without Codable's per-row
+    // container allocation.
+    public func selectAllFast<T: ClickHouseRowDecodable & Sendable>(
+        _ sql: String,
+        as type: T.Type,
+        timeout: Duration = ClickHouseQueryDefaults.selectTimeout,
+        settings: ClickHouseQuerySettings = .empty,
+        parameters: ClickHouseQueryParameters = .empty
+    ) async throws(ClickHouseError) -> [T] {
+        let injected = Self.injectMaxExecutionTime(into: settings, timeout: timeout)
+        return try await Self.withTimeout(self, timeout: timeout) {
+            try await self.selectAllFastInternal(
+                sql: sql,
+                type: type,
+                settings: injected,
+                parameters: parameters
+            )
+        }
+    }
+
+    nonisolated func selectAllFastInternal<T: ClickHouseRowDecodable & Sendable>(
+        sql: String,
+        type: T.Type,
+        settings: ClickHouseQuerySettings,
+        parameters: ClickHouseQueryParameters
+    ) async throws(ClickHouseError) -> [T] {
+        try await collectFast(sql: sql, settings: settings, parameters: parameters)
     }
 
     public func selectAll<T: Decodable & Sendable>(
@@ -127,8 +191,24 @@ extension ClickHouseClient {
         timeout: Duration = ClickHouseQueryDefaults.insertTimeout,
         settings: ClickHouseQuerySettings = .empty
     ) async throws(ClickHouseError) -> ClickHouseInsertSummary {
-        try await Self.withTimeout(self, timeout: timeout) {
-            try await self.insertInternal(into: table, rows: rows, settings: settings)
+        let injected = Self.injectMaxExecutionTime(into: settings, timeout: timeout)
+        return try await Self.withTimeout(self, timeout: timeout) {
+            try await self.insertInternal(into: table, rows: rows, settings: injected)
+        }
+    }
+
+    // Columnar fast-path equivalent of `insert` for a ClickHouseColumnarEncodable
+    // batch: the same INSERT, encoded column-by-column without Codable's per-row
+    // container allocation.
+    public func insertFast<T: ClickHouseColumnarEncodable & Sendable>(
+        into table: String,
+        rows: [T],
+        timeout: Duration = ClickHouseQueryDefaults.insertTimeout,
+        settings: ClickHouseQuerySettings = .empty
+    ) async throws(ClickHouseError) -> ClickHouseInsertSummary {
+        let injected = Self.injectMaxExecutionTime(into: settings, timeout: timeout)
+        return try await Self.withTimeout(self, timeout: timeout) {
+            try await self.insertFastCore(into: table, rows: rows, settings: injected)
         }
     }
 
@@ -139,12 +219,13 @@ extension ClickHouseClient {
         timeout: Duration = ClickHouseQueryDefaults.insertTimeout,
         settings: ClickHouseQuerySettings = .empty
     ) async throws(ClickHouseError) -> ClickHouseInsertSummary {
-        try await Self.withTimeout(self, timeout: timeout) {
+        let injected = Self.injectMaxExecutionTime(into: settings, timeout: timeout)
+        return try await Self.withTimeout(self, timeout: timeout) {
             try await self.insertNativeBlockInternal(
                 table: table,
                 columnList: columnList,
                 nativeBlockBytes: nativeBlockBytes,
-                settings: settings
+                settings: injected
             )
         }
     }
@@ -189,14 +270,15 @@ extension ClickHouseClient {
 
     nonisolated func executeInternal(
         sql: String,
-        settings: ClickHouseQuerySettings
+        settings: ClickHouseQuerySettings,
+        parameters: ClickHouseQueryParameters
     ) async throws(ClickHouseError) {
         _ = try await runOnTransportReturning { (transport: ClientTransportBox) throws(ClickHouseError) -> Int in
             try transport.connection.sendQuery(
                 sql,
                 queryID: "",
                 settings: settings,
-                parameters: .empty
+                parameters: parameters
             )
             _ = try transport.connection.receiveBlocks { _, _ in }
             return 0
@@ -213,9 +295,10 @@ extension ClickHouseClient {
     nonisolated func scalarInternal<T: Decodable & Sendable>(
         sql: String,
         type: T.Type,
-        settings: ClickHouseQuerySettings
+        settings: ClickHouseQuerySettings,
+        parameters: ClickHouseQueryParameters
     ) async throws(ClickHouseError) -> T {
-        let stream = selectScalarStream(sql: sql, type: type, settings: settings)
+        let stream = selectScalarStream(sql: sql, type: type, settings: settings, parameters: parameters)
         var collected: [T] = []
         do {
             for try await value in stream { collected.append(value) }
@@ -236,16 +319,7 @@ extension ClickHouseClient {
         settings: ClickHouseQuerySettings,
         parameters: ClickHouseQueryParameters
     ) async throws(ClickHouseError) -> [T] {
-        let stream = select(sql, as: type, settings: settings, parameters: parameters)
-        do {
-            var collected: [T] = []
-            for try await row in stream { collected.append(row) }
-            return collected
-        } catch let error as ClickHouseError {
-            throw error
-        } catch {
-            throw .protocolError(stage: "selectAllInternal", message: "\(error)")
-        }
+        try await collectCodable(sql: sql, settings: settings, parameters: parameters)
     }
 
     nonisolated func insertInternal<T: Encodable & Sendable>(
@@ -325,11 +399,25 @@ extension ClickHouseClient {
         return Double(components.seconds) + Double(components.attoseconds) / 1_000_000_000_000_000_000
     }
 
+    // Fixed POSIX locale used to format the max_execution_time wire value.
+    // On Linux, String(format:) without an explicit locale honors
+    // LC_NUMERIC, so a process that called setlocale to a comma-decimal
+    // locale (de_DE, fr_FR, and most of continental Europe) would emit
+    // e.g. "1,500" and send ClickHouse a malformed setting that breaks the
+    // server-side query timeout. Formatting against en_US_POSIX pins the
+    // decimal separator to '.' regardless of the host locale.
+    private static let wireNumberLocale = Locale(identifier: "en_US_POSIX")
+
     private static func formatSeconds(_ seconds: Double) -> String {
         if seconds >= 1 {
-            return String(format: "%.3f", seconds)
+            return String(format: "%.3f", locale: wireNumberLocale, seconds)
         }
-        return String(format: "%.6f", seconds)
+        // A positive sub-microsecond timeout would format to "0.000000" at
+        // six decimals, which ClickHouse reads as max_execution_time=0 = no
+        // limit — the opposite of a deadline. Clamp up to the smallest value
+        // the format can represent so the server-side bound stays positive.
+        let bounded = Swift.max(seconds, 0.000001)
+        return String(format: "%.6f", locale: wireNumberLocale, bounded)
     }
 
     static func decodeSQLBytes(_ bytes: [UInt8]) -> String {

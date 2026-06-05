@@ -48,8 +48,28 @@ public struct ClickHouseMap: Sendable, Hashable, Codable {
         )
     }
 
+    public static func stringToString(_ entries: [(String, String)]) -> ClickHouseMap {
+        ClickHouseMap(
+            keyElement: .string,
+            valueElement: .string,
+            keys: entries.map { Array($0.0.utf8) },
+            values: entries.map { Array($0.1.utf8) }
+        )
+    }
+
     public var stringKeys: [String] {
         keys.map { String(decoding: $0, as: UTF8.self) }
+    }
+
+    public var stringValues: [String] {
+        values.map { String(decoding: $0, as: UTF8.self) }
+    }
+
+    // String-to-String view of a Map(String, String) row. A repeated key
+    // keeps the last entry's value, matching how ClickHouse resolves a
+    // duplicate Map key on read.
+    public var stringDictionary: [String: String] {
+        Dictionary(zip(stringKeys, stringValues), uniquingKeysWith: { _, latest in latest })
     }
 
     public func uint64Value(at entry: Int) -> UInt64 {
