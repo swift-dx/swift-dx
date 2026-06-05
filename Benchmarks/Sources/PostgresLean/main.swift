@@ -11,6 +11,8 @@
 
 import DXPostgres
 import Foundation
+import Logging
+import ServiceLifecycle
 
 // Minimal benchmark for the optimized DXPostgres package. Exercises only the
 // scalar fast path the package exposes: the synchronous direct connection, the
@@ -203,6 +205,55 @@ private func runWatchDemo() async throws {
     listener.close()
 }
 
+private func runServiceDemo() async throws {
+    // config -> Service in a ServiceGroup -> ambient client -> query -> graceful shutdown
+    let configuration = PostgresConfiguration(host: host, port: port, username: username, password: password, database: database, applicationName: "dxservice", poolSize: 4)
+    let pool = try Postgres.service(configuration)
+    var logger = Logger(label: "dxservice")
+    logger.logLevel = .error
+    let group = ServiceGroup(services: [pool], logger: logger)
+    try await withThrowingTaskGroup(of: Void.self) { tasks in
+        tasks.addTask { try await group.run() }
+        try await Postgres.withCurrent(pool) {
+            // Nothing here was handed the pool; it reads the ambient client.
+            let result = try await Postgres.execute("SELECT 42 AS answer")
+            print("[SERVICE DEMO] ambient Postgres.execute() returned \(try result.rows[0][0].text()); pool ran as a ServiceLifecycle Service")
+        }
+        await group.triggerGracefulShutdown()
+        try await tasks.waitForAll()
+    }
+    print("[SERVICE DEMO] graceful shutdown complete; pool torn down")
+}
+
+private func runSoak() async throws {
+    let seconds = envInt("POSTGRES_BENCH_SOAK_SECONDS", 20)
+    let pool = try PostgresLeasePool(host: host, port: port, username: username, password: password, database: database, applicationName: "dxsoak", size: concurrency)
+    defer { pool.shutdown() }
+    let start = ContinuousClock.now
+    let deadline = start.advanced(by: .seconds(seconds))
+    let total = try await withThrowingTaskGroup(of: Int.self, returning: Int.self) { group in
+        for _ in 0..<clients {
+            group.addTask {
+                var done = 0
+                while ContinuousClock.now < deadline {
+                    let value = Int64(done % 1_000_000)
+                    let n = try await pool.withConnection { connection in
+                        try connection.queryScalarInt64("SELECT $1::int8 AS n", value: value)
+                    }
+                    precondition(n == value, "soak returned wrong value")
+                    done += 1
+                }
+                return done
+            }
+        }
+        var collected = 0
+        for try await done in group { collected += done }
+        return collected
+    }
+    let elapsed = elapsedSeconds(start)
+    print("[SOAK] \(total) queries over \(String(format: "%.1f", elapsed))s = \(rate(total, elapsed))/s, pool=\(concurrency) clients=\(clients) — completed cleanly, no crash")
+}
+
 print("[POSTGRES PERF SWIFT] lean config host=\(host) port=\(port) database=\(database) modes=\(modes.joined(separator: ","))")
 for mode in modes {
     do {
@@ -216,6 +267,8 @@ for mode in modes {
         case "contention_pool_scalar": try await runContentionPoolScalar()
         case "lease_scalar": try await runLeaseScalar()
         case "select_demo": try await runSelectDemo()
+        case "service_demo": try await runServiceDemo()
+        case "soak": try await runSoak()
         default: print("[POSTGRES PERF SWIFT] unknown mode: \(mode)")
         }
     } catch {

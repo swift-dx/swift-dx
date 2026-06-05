@@ -19,6 +19,8 @@ let package = Package(
     ],
     dependencies: [
         .package(path: ".."),
+        .package(url: "https://github.com/swift-server/swift-service-lifecycle.git", from: "2.6.0"),
+        .package(url: "https://github.com/apple/swift-log.git", from: "1.12.0"),
     ],
     targets: [
         .executableTarget(
@@ -194,6 +196,8 @@ let package = Package(
             name: "PostgresLeanBenchmark",
             dependencies: [
                 .product(name: "DXPostgres", package: "swift-dx"),
+                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
+                .product(name: "Logging", package: "swift-log"),
             ],
             path: "Sources/PostgresLean",
             swiftSettings: [

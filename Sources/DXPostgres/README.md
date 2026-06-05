@@ -78,6 +78,36 @@ try await pool.withConnection { connection in
 }
 ```
 
+## Configuration, service lifecycle, and ambient access
+
+Configure once, run as a ServiceLifecycle `Service`, and reach the pool from
+anywhere via a task-local ambient binding:
+
+```swift
+let configuration = PostgresConfiguration(
+    host: "127.0.0.1", port: 5432, username: "app", password: "",
+    database: "app", applicationName: "myapp", poolSize: 8
+)
+
+// A client that is also a Service — add it to a ServiceGroup so the pool is
+// torn down on graceful shutdown (SIGTERM/SIGINT).
+let postgres = try Postgres.service(configuration)
+let group = ServiceGroup(services: [postgres, httpServer], logger: logger)
+
+// Bind it as the ambient client; code deep in the call tree reads it back.
+try await Postgres.withCurrent(postgres) {
+    try await group.run()
+}
+
+// Anywhere inside that task tree — no one had to be handed the pool:
+func activeUserCount() async throws -> PostgresResult {
+    try await Postgres.execute("SELECT count(*) FROM users WHERE active")
+}
+```
+
+`Postgres.current()` returns the bound client, or throws
+`PostgresError.noCurrentClient` when nothing is bound — no null, no trap.
+
 ## LISTEN / NOTIFY and table watching
 
 ```swift
@@ -141,9 +171,10 @@ libpq, with no collapse.
 
 ## Dependencies
 
-`DXCore`, swift-nio (`NIOCore`, for `ByteBuffer`), and swift-crypto (`Crypto`,
-for SCRAM/MD5). No event loop, no atomics package, no TLS stack on the query
-path.
+`DXCore`, swift-nio (`NIOCore`, for `ByteBuffer`), swift-crypto (`Crypto`, for
+SCRAM/MD5), and swift-service-lifecycle (`ServiceLifecycle`, for running the pool
+as a managed `Service`). No event loop, no atomics package, no TLS stack on the
+query path.
 
 ## Status
 

@@ -94,6 +94,7 @@ let package = Package(
                 "DXCore",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
             ],
             exclude: ["README.md"],
             plugins: integrityPlugins
