@@ -59,6 +59,35 @@ import Glibc
         #expect(result.rows[2] == [.bytes(Array("3".utf8)), .bytes([])])
     }
 
+    @Test func parameterizedQueryDecodesResultsOverTheExtendedProtocol() throws {
+        var descriptors: [Int32] = [0, 0]
+        #expect(socketpair(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0, &descriptors) == 0)
+        defer { close(descriptors[1]) }
+
+        let response = parseComplete + bindComplete
+            + rowDescription([("id", 23), ("email", 25)])
+            + dataRow([.value(Array("7".utf8)), .value(Array("a@b.com".utf8))])
+            + commandComplete("SELECT 1")
+            + readyForQuery
+        response.withUnsafeBytes { _ = write(descriptors[1], $0.baseAddress, $0.count) }
+
+        let connection = BlockingPostgresConnection(descriptor: descriptors[0])
+        defer { connection.close() }
+
+        let injection = "x'); DROP TABLE users;--"
+        let statement: PostgresStatement = "SELECT id, email FROM users WHERE email = \(injection)"
+        let result = try connection.query(statement.sql, bindings: statement.bindings)
+
+        #expect(statement.sql == "SELECT id, email FROM users WHERE email = $1")
+        #expect(result.columns.map(\.name) == ["id", "email"])
+        #expect(result.rows.count == 1)
+        #expect(result.rows[0] == [.bytes(Array("7".utf8)), .bytes(Array("a@b.com".utf8))])
+    }
+
+    private var parseComplete: [UInt8] { [0x31, 0x00, 0x00, 0x00, 0x04] }
+
+    private var bindComplete: [UInt8] { [0x32, 0x00, 0x00, 0x00, 0x04] }
+
     private enum Field {
 
         case value([UInt8])
