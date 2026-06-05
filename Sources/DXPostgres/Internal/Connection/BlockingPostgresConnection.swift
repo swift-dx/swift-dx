@@ -142,13 +142,30 @@ final class BlockingPostgresConnection: @unchecked Sendable {
             let total = length + 1
             while readBuffer.readableBytes < total { try fillReadBuffer() }
             if (readBuffer.getInteger(at: base, as: UInt8.self) ?? 0) == 0x44 {
-                try onRow(PostgresRowView(buffer: readBuffer, base: base))
-                readBuffer.moveReaderIndex(forwardBy: total)
-                reclaimReadBuffer()
+                try deliverRow(at: base, total: total, to: onRow)
             } else if try absorbControlMessage(into: &columns) {
                 return columns
             }
         }
+    }
+
+    private func deliverRow(at base: Int, total: Int, to onRow: (PostgresRowView) throws(PostgresError) -> Void) throws(PostgresError) {
+        do {
+            try onRow(PostgresRowView(buffer: readBuffer, base: base))
+        } catch {
+            try resyncAfterRowFailure(error)
+        }
+        readBuffer.moveReaderIndex(forwardBy: total)
+        reclaimReadBuffer()
+    }
+
+    private func resyncAfterRowFailure(_ original: PostgresError) throws(PostgresError) -> Never {
+        do {
+            try consumeUntilReadyForQuery()
+        } catch {
+            throw PostgresError.connectionClosed
+        }
+        throw original
     }
 
     private func absorbControlMessage(into columns: inout [PostgresColumn]) throws(PostgresError) -> Bool {
