@@ -68,4 +68,16 @@ import Testing
             try result.decode(as: Flag.self)
         }
     }
+
+    @Test func nullIntoNonNullableFieldThrowsRatherThanCrashing() throws {
+        let result = PostgresResult(columns: [column("active", 16)], rows: [[.sqlNull]])
+        #expect(throws: PostgresError.self) {
+            try result.decode(as: Flag.self)
+        }
+    }
+
+    @Test func emptyResultDecodesToEmptyArray() throws {
+        let result = PostgresResult(columns: [column("active", 16)], rows: [])
+        #expect(try result.decode(as: Flag.self).isEmpty)
+    }
 }
