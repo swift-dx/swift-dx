@@ -26,28 +26,41 @@ public final class PostgresLeasePool: @unchecked Sendable {
     private struct PoolState {
 
         var free: [Int]
-        var waiters: [UnsafeContinuation<Int, Never>]
+        var waiters: [UnsafeContinuation<Int, Error>]
+        var shuttingDown: Bool
     }
 
     private let workers: [LeaseWorker]
     private let state: Mutex<PoolState>
 
-    public init(host: String, port: Int, username: String, password: String, database: String, applicationName: String, size: Int) throws(PostgresError) {
+    public convenience init(host: String, port: Int, username: String, password: String, database: String, applicationName: String, size: Int) throws(PostgresError) {
         let count = max(1, size)
-        var workers: [LeaseWorker] = []
-        workers.reserveCapacity(count)
+        var connections: [BlockingPostgresConnection] = []
+        connections.reserveCapacity(count)
         for _ in 0..<count {
-            let connection = try BlockingPostgresConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName)
+            connections.append(try BlockingPostgresConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName))
+        }
+        self.init(connections: connections)
+    }
+
+    init(connections: [BlockingPostgresConnection]) {
+        var workers: [LeaseWorker] = []
+        workers.reserveCapacity(connections.count)
+        for connection in connections {
             let worker = LeaseWorker(connection: connection)
             worker.start()
             workers.append(worker)
         }
         self.workers = workers
-        self.state = Mutex(PoolState(free: Array(0..<count), waiters: []))
+        self.state = Mutex(PoolState(free: Array(0..<workers.count), waiters: [], shuttingDown: false))
+    }
+
+    var waiterCount: Int {
+        state.withLock { $0.waiters.count }
     }
 
     public func withConnection<Result: Sendable>(_ body: @escaping @Sendable (PostgresLeasedConnection) throws -> Result) async throws -> Result {
-        let index = await acquire()
+        let index = try await acquire()
         do {
             let result = try await runLeased(index, body)
             release(index)
@@ -84,6 +97,13 @@ public final class PostgresLeasePool: @unchecked Sendable {
 
     public func shutdown() {
         for worker in workers { worker.stop() }
+        let parked = state.withLock { state -> [UnsafeContinuation<Int, Error>] in
+            state.shuttingDown = true
+            let waiters = state.waiters
+            state.waiters = []
+            return waiters
+        }
+        for waiter in parked { waiter.resume(throwing: PostgresError.poolShutdown) }
     }
 
     private func runLeased<Result: Sendable>(_ index: Int, _ body: @escaping @Sendable (PostgresLeasedConnection) throws -> Result) async throws -> Result {
@@ -106,25 +126,38 @@ public final class PostgresLeasePool: @unchecked Sendable {
 
         case leased(Int)
         case parked
+        case shuttingDown
     }
 
     private enum Release {
 
         case returnedToFreeList
-        case handoff(UnsafeContinuation<Int, Never>)
+        case handoff(UnsafeContinuation<Int, Error>)
     }
 
-    private func acquire() async -> Int {
+    private func acquire() async throws -> Int {
         if let index = state.withLock({ $0.free.popLast() }) {
             return index
         }
-        return await withUnsafeContinuation { continuation in
-            let outcome: Acquisition = state.withLock {
-                if let index = $0.free.popLast() { return .leased(index) }
-                $0.waiters.append(continuation)
-                return .parked
-            }
-            if case .leased(let index) = outcome { continuation.resume(returning: index) }
+        return try await withUnsafeThrowingContinuation { (continuation: UnsafeContinuation<Int, Error>) in
+            resumeOrPark(continuation)
+        }
+    }
+
+    private func resumeOrPark(_ continuation: UnsafeContinuation<Int, Error>) {
+        switch claimOrEnqueue(continuation) {
+        case .leased(let index): continuation.resume(returning: index)
+        case .shuttingDown: continuation.resume(throwing: PostgresError.poolShutdown)
+        case .parked: break
+        }
+    }
+
+    private func claimOrEnqueue(_ continuation: UnsafeContinuation<Int, Error>) -> Acquisition {
+        state.withLock {
+            if $0.shuttingDown { return .shuttingDown }
+            if let index = $0.free.popLast() { return .leased(index) }
+            $0.waiters.append(continuation)
+            return .parked
         }
     }
 
