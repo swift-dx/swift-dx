@@ -68,4 +68,10 @@ extension Postgres {
     public static func query<T: Decodable & Sendable>(_ statement: PostgresStatement, as type: T.Type) async throws(PostgresError) -> [T] {
         try await current().query(statement, as: type)
     }
+
+    /// Runs a transaction on the ambient client: every statement on the handed-in
+    /// ``PostgresTransaction`` commits together on return, or rolls back on a throw.
+    public static func transaction<Result: Sendable>(_ body: @escaping @Sendable (PostgresTransaction) throws -> Result) async throws -> Result {
+        try await current().transaction(body)
+    }
 }

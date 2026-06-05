@@ -24,6 +24,12 @@ public protocol PostgresClient: Sendable {
     /// spliced, and returns the result.
     func query(_ statement: PostgresStatement) async throws(PostgresError) -> PostgresResult
 
+    /// Runs `body` as a single transaction: every statement on the handed-in
+    /// ``PostgresTransaction`` executes on one connection, in order, between a
+    /// `BEGIN` and a `COMMIT`. Returning commits; throwing rolls back and rethrows
+    /// the thrown error. There is no connection to manage.
+    func transaction<Result: Sendable>(_ body: @escaping @Sendable (PostgresTransaction) throws -> Result) async throws -> Result
+
     /// Releases every pooled connection. Call once when the client is no longer
     /// needed; in-flight statements should complete first.
     func shutdown()

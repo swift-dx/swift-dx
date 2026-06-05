@@ -130,10 +130,10 @@ private func runLeaseScalar() async throws {
     let total = try await withThrowingTaskGroup(of: Int.self, returning: Int.self) { group in
         for _ in 0..<clients {
             group.addTask {
-                try await pool.withConnection { connection in
+                try await pool.transaction { transaction in
                     var done = 0
                     for value in 0..<perClient {
-                        let n = try connection.queryScalarInt64("SELECT $1::int8 AS n", value: Int64(value))
+                        let n = try transaction.queryScalarInt64("SELECT $1::int8 AS n", value: Int64(value))
                         if n == Int64(value) { done += 1 }
                     }
                     return done
@@ -271,8 +271,8 @@ private func runSoak() async throws {
                 var done = 0
                 while ContinuousClock.now < deadline {
                     let value = Int64(done % 1_000_000)
-                    let n = try await pool.withConnection { connection in
-                        try connection.queryScalarInt64("SELECT $1::int8 AS n", value: value)
+                    let n = try await pool.transaction { transaction in
+                        try transaction.queryScalarInt64("SELECT $1::int8 AS n", value: value)
                     }
                     precondition(n == value, "soak returned wrong value")
                     done += 1

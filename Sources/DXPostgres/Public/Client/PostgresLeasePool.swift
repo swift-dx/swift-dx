@@ -59,7 +59,33 @@ public final class PostgresLeasePool: @unchecked Sendable {
         state.withLock { $0.waiters.count }
     }
 
-    public func withConnection<Result: Sendable>(_ body: @escaping @Sendable (PostgresLeasedConnection) throws -> Result) async throws -> Result {
+    public func transaction<Result: Sendable>(_ body: @escaping @Sendable (PostgresTransaction) throws -> Result) async throws -> Result {
+        try await withConnection { lease in
+            try Self.runTransaction(on: lease, body)
+        }
+    }
+
+    private static func runTransaction<Result>(on lease: PostgresLeasedConnection, _ body: (PostgresTransaction) throws -> Result) throws -> Result {
+        _ = try lease.execute("BEGIN")
+        do {
+            let result = try body(PostgresTransaction(lease: lease))
+            _ = try lease.execute("COMMIT")
+            return result
+        } catch {
+            try rollback(lease, rethrowing: error)
+        }
+    }
+
+    private static func rollback(_ lease: PostgresLeasedConnection, rethrowing original: Error) throws -> Never {
+        do {
+            _ = try lease.execute("ROLLBACK")
+        } catch {
+            throw PostgresError.transportError(reason: "transaction rollback failed: \(error)")
+        }
+        throw original
+    }
+
+    func withConnection<Result: Sendable>(_ body: @escaping @Sendable (PostgresLeasedConnection) throws -> Result) async throws -> Result {
         let index = try await acquire()
         do {
             let result = try await runLeased(index, body)

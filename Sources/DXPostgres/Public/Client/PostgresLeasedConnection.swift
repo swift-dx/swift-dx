@@ -15,7 +15,7 @@
 /// no per-query async hand-off — the lease pays one hand-off and then proceeds at
 /// the speed of the synchronous core. The handle is valid only inside the closure
 /// and must not be stored or shared; it is deliberately not `Sendable`.
-public struct PostgresLeasedConnection {
+struct PostgresLeasedConnection {
 
     private let connection: BlockingPostgresConnection
 
@@ -23,29 +23,29 @@ public struct PostgresLeasedConnection {
         self.connection = connection
     }
 
-    public func execute(_ sql: String) throws(PostgresError) -> PostgresResult {
+    func execute(_ sql: String) throws(PostgresError) -> PostgresResult {
         try connection.execute(sql)
     }
 
     @discardableResult
-    public func execute(_ sql: String, onRow: (PostgresRowView) throws(PostgresError) -> Void) throws(PostgresError) -> [PostgresColumn] {
+    func execute(_ sql: String, onRow: (PostgresRowView) throws(PostgresError) -> Void) throws(PostgresError) -> [PostgresColumn] {
         try connection.execute(sql, onRow: onRow)
     }
 
-    public func query(_ statement: PostgresStatement) throws(PostgresError) -> PostgresResult {
+    func query(_ statement: PostgresStatement) throws(PostgresError) -> PostgresResult {
         try connection.query(statement.sql, bindings: statement.bindings)
     }
 
-    public func query<T: Decodable>(_ statement: PostgresStatement, as type: T.Type) throws(PostgresError) -> [T] {
+    func query<T: Decodable>(_ statement: PostgresStatement, as type: T.Type) throws(PostgresError) -> [T] {
         try connection.query(statement.sql, bindings: statement.bindings).decode(as: type)
     }
 
     @discardableResult
-    public func query(_ statement: PostgresStatement, onRow: (PostgresRowView) throws(PostgresError) -> Void) throws(PostgresError) -> [PostgresColumn] {
+    func query(_ statement: PostgresStatement, onRow: (PostgresRowView) throws(PostgresError) -> Void) throws(PostgresError) -> [PostgresColumn] {
         try connection.query(statement.sql, bindings: statement.bindings, onRow: onRow)
     }
 
-    public func queryScalarInt64(_ sql: String, value: Int64) throws(PostgresError) -> Int64 {
+    func queryScalarInt64(_ sql: String, value: Int64) throws(PostgresError) -> Int64 {
         try connection.queryScalarInt64Inline(sql, value: value)
     }
 }

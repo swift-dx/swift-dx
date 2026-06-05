@@ -91,16 +91,35 @@ For the hot path of a single typed value, `queryScalarInt64` runs the extended
 protocol with a binary result and reads the integer straight off the wire with
 zero allocation.
 
-## Leases and transactions
+## Transactions
 
-`withConnection` pins one connection for a unit of work — the basis for
-transactions and multi-statement sessions:
+`transaction` runs a closure as one unit of work. Every statement inside runs on
+a single connection, in order, between a `BEGIN` and a `COMMIT`. Returning from
+the closure commits; throwing rolls back and rethrows your error. There is no
+connection to acquire, hold, or release — that is handled for you.
 
 ```swift
-try await pool.withConnection { connection in
-    // every statement here runs on the same connection, synchronously
+try await postgres.transaction { tx in
+    try tx.execute("UPDATE accounts SET balance = balance - \(amount) WHERE id = \(from)")
+    try tx.execute("UPDATE accounts SET balance = balance + \(amount) WHERE id = \(to)")
+}   // committed on return; rolled back if either statement, or your own check, throws
+
+// Throw your own error to roll back and recover it unchanged:
+do {
+    try await postgres.transaction { tx in
+        let balance = try tx.queryScalarInt64("SELECT balance FROM accounts WHERE id = \(from)::int8", value: 0)
+        guard balance >= amount else { throw PaymentError.insufficientFunds }
+        try tx.execute("UPDATE accounts SET balance = balance - \(amount) WHERE id = \(from)")
+    }
+} catch PaymentError.insufficientFunds {
+    // the transaction rolled back; your error reached you intact
 }
 ```
+
+The same statements are available on `tx` as on the client — `execute`, `query`,
+`query(_:as:)` — so a transaction reads exactly like ad-hoc work, just grouped.
+Through the ambient client it is `Postgres.transaction { tx in … }`, with no
+client or connection passed in.
 
 ## Configuration, service lifecycle, and ambient access
 
