@@ -10,26 +10,112 @@ while callers keep a plain `async` API.
 ## What it does
 
 - **Connect** over plaintext TCP with trust, cleartext, MD5, or SCRAM-SHA-256
-  authentication.
-- **Run any statement** and read rows back as raw bytes, decoded text, or
-  parsed integers — owned or streamed.
-- **Pool** connections behind a lease so a transaction or a batch holds one
-  connection and pays the async hand-off once per unit of work, not per query.
-- **`LISTEN`/`NOTIFY`**, including a `watchTable` helper that installs a
-  change-capture trigger with an optional server-side filter.
+  authentication, behind a bounded connection pool.
+- **Run statements** — `execute` for raw SQL, a parameterized `query` whose
+  interpolated values are bound rather than spliced, and `query(_:as:)` that
+  decodes rows straight into your `Decodable` types.
+- **Group work into transactions** with `transaction { tx in … }`: commit on
+  return, roll back on a thrown error — with no connection to manage.
+- **Subscribe** to `NOTIFY` channels, including a `watchTable` helper that
+  installs a change-capture trigger with an optional server-side filter.
 
-## Quick start
+## Install
+
+Add the package and depend on the `DXPostgres` product:
+
+```swift
+// Package.swift
+dependencies: [
+    .package(url: "https://github.com/swift-dx/swift-dx", .upToNextMinor(from: "0.1.0")),
+],
+targets: [
+    .target(name: "MyApp", dependencies: [
+        .product(name: "DXPostgres", package: "swift-dx"),
+    ]),
+]
+```
 
 ```swift
 import DXPostgres
+```
 
-let postgres = try Postgres.connect(
-    host: "127.0.0.1", port: 5432,
-    username: "app", password: "", database: "app",
-    applicationName: "myapp", poolSize: 4
+## Connecting
+
+A `PostgresConfiguration` holds everything needed to open the pool. Pass an empty
+password for a trust role.
+
+```swift
+let configuration = PostgresConfiguration(
+    host: "127.0.0.1", port: 5432, username: "app", password: "",
+    database: "app", applicationName: "myapp", poolSize: 8
 )
-defer { postgres.shutdown() }
+```
 
+For a script or a one-off tool, open a client and shut it down when done:
+
+```swift
+let postgres = try Postgres.connect(configuration)
+defer { postgres.shutdown() }
+```
+
+For a server, run the client as a ServiceLifecycle `Service` so the pool is torn
+down on graceful shutdown, and bind it as the ambient client so code anywhere in
+the task tree can reach it without being handed the pool:
+
+```swift
+let postgres = try Postgres.service(configuration)
+let group = ServiceGroup(services: [postgres, httpServer], logger: logger)
+
+try await Postgres.withCurrent(postgres) {
+    try await group.run()
+}
+
+// Anywhere inside that task tree — nobody had to pass the pool around:
+func activeUsers() async throws -> PostgresResult {
+    try await Postgres.execute("SELECT count(*) FROM users WHERE active")
+}
+```
+
+`Postgres.connect`/`service` return `some PostgresClient`; the concrete pool type
+stays hidden. `Postgres.current()` returns the bound ambient client, or throws
+`PostgresError.noCurrentClient` when nothing is bound — no null, no trap.
+
+## Running queries
+
+```swift
+// Raw statement, owned result:
+let result = try await postgres.execute("SELECT id, email FROM users")
+
+// Parameterized — interpolated values are bound parameters, never spliced into
+// the SQL, so even an injection string is just data:
+let email = userInput
+let rows = try await postgres.query("SELECT id, email FROM users WHERE email = \(email)")
+
+// Decoded straight into your Decodable type:
+struct Account: Decodable, Sendable {
+
+    let id: Int
+    let email: String
+    let active: Bool
+}
+
+let accounts = try await postgres.query(
+    "SELECT id, email, active FROM accounts WHERE email = \(email)",
+    as: Account.self
+)
+```
+
+Each `\(value)` becomes a `$1`, `$2`, … bound over the extended protocol. Use
+`query(statement)` for an untyped `PostgresResult`, or `result.decode(as:)` to
+decode a result you already have.
+
+## Reading results
+
+A `PostgresResult` is the column descriptions (name, type OID, wire format) sent
+once, paired with rows. Each field is a `PostgresCell` — `.bytes([UInt8])` or
+`.sqlNull`, a named value rather than an optional:
+
+```swift
 let result = try await postgres.execute("SELECT id, email FROM users")
 let emailColumn = try result.columnIndex(named: "email")
 for row in result.rows {
@@ -39,57 +125,20 @@ for row in result.rows {
 }
 ```
 
-`Postgres.connect` returns `some PostgresClient`; the concrete pool type stays
-hidden. Use a trust role by passing an empty password.
-
-## Parameterized and typed queries
-
-Interpolated values are bound parameters, never spliced into the SQL, and rows
-decode straight into your `Decodable` types:
+For the hot path, the streaming form `execute(_:onRow:)` — available on a
+transaction's `tx` and on a strictly-serial `PostgresDirectConnection` — hands
+each row to a closure read in place from the read buffer, with no per-row
+allocation; you copy out only the fields you keep:
 
 ```swift
-struct Account: Decodable, Sendable {
-
-    let id: Int
-    let email: String
-    let active: Bool
-}
-
-let email = userInput   // even an injection string is just data
-let accounts = try await postgres.query(
-    "SELECT id, email, active FROM accounts WHERE email = \(email)",
-    as: Account.self
-)
-```
-
-Each `\(value)` becomes a `$1`, `$2`, … bound over the extended protocol. Use
-`query(statement)` for an untyped `PostgresResult`, or `result.decode(as:)` to
-decode an existing result.
-
-## Reading results: three shapes, one core
-
-A query result is the column descriptions (name, type OID, wire format) sent
-once, paired with rows. The streaming primitive is the core; the owned result
-is that stream collected.
-
-```swift
-// Owned — keep everything. Each field is a PostgresCell (.bytes([UInt8]) or .sqlNull).
-let result = try await postgres.execute("SELECT id, name FROM users")
-
-// Streamed — borrowed rows read in place from the read buffer, ~0 allocation per row.
 try connection.execute("SELECT id, name FROM users") { row in
     let id = try row.int64(0)       // parsed in place, no allocation
     let name = try row.text(1)      // copies only this field
 }
-
-// Streamed, collected into a variable — pay only for what you keep.
-var names: [String] = []
-try connection.execute("SELECT name FROM users") { row in names.append(try row.text(0)) }
 ```
 
-For the hot path of a single typed value, `queryScalarInt64` runs the extended
-protocol with a binary result and reads the integer straight off the wire with
-zero allocation.
+`queryScalarInt64` reads a single `int8` straight off the wire over the extended
+protocol with a binary result and zero allocation.
 
 ## Transactions
 
@@ -121,36 +170,6 @@ The same statements are available on `tx` as on the client — `execute`, `query
 Through the ambient client it is `Postgres.transaction { tx in … }`, with no
 client or connection passed in.
 
-## Configuration, service lifecycle, and ambient access
-
-Configure once, run as a ServiceLifecycle `Service`, and reach the pool from
-anywhere via a task-local ambient binding:
-
-```swift
-let configuration = PostgresConfiguration(
-    host: "127.0.0.1", port: 5432, username: "app", password: "",
-    database: "app", applicationName: "myapp", poolSize: 8
-)
-
-// A client that is also a Service — add it to a ServiceGroup so the pool is
-// torn down on graceful shutdown (SIGTERM/SIGINT).
-let postgres = try Postgres.service(configuration)
-let group = ServiceGroup(services: [postgres, httpServer], logger: logger)
-
-// Bind it as the ambient client; code deep in the call tree reads it back.
-try await Postgres.withCurrent(postgres) {
-    try await group.run()
-}
-
-// Anywhere inside that task tree — no one had to be handed the pool:
-func activeUserCount() async throws -> PostgresResult {
-    try await Postgres.execute("SELECT count(*) FROM users WHERE active")
-}
-```
-
-`Postgres.current()` returns the bound client, or throws
-`PostgresError.noCurrentClient` when nothing is bound — no null, no trap.
-
 ## Subscriptions
 
 ```swift
@@ -172,6 +191,24 @@ for try await change in watch.notifications {
 Each notification the subscription yields is delivered to the async stream;
 ending the stream tears the subscription down. The subscription manages its own
 connection.
+
+## Status
+
+This is the lean, high-performance core. Current scope:
+
+- Plaintext only; TLS is not yet on this path.
+- The zero-allocation typed fast path covers `Int64`; a generalized
+  `queryScalar<T>` / typed-row family is planned.
+- `query(_:)` binds parameters over the extended protocol with text results and
+  decodes rows into `Decodable` types; binary result encoding to bring it onto
+  the scalar fast path's ceiling is planned.
+
+## Dependencies
+
+`DXCore`, swift-nio (`NIOCore`, for `ByteBuffer`), swift-crypto (`Crypto`, for
+SCRAM/MD5), and swift-service-lifecycle (`ServiceLifecycle`, for running the pool
+as a managed `Service`). No event loop, no atomics package, no TLS stack on the
+query path.
 
 ## Performance
 
@@ -210,21 +247,3 @@ per query, so it stays near 260–280k from 10 to 10,000 clients while a
 per-query pool (libpq's and the async-per-call pool's weak point) falls toward
 150k. At 10,000 concurrent clients over 10 connections it is ~80% ahead of
 libpq, with no collapse.
-
-## Dependencies
-
-`DXCore`, swift-nio (`NIOCore`, for `ByteBuffer`), swift-crypto (`Crypto`, for
-SCRAM/MD5), and swift-service-lifecycle (`ServiceLifecycle`, for running the pool
-as a managed `Service`). No event loop, no atomics package, no TLS stack on the
-query path.
-
-## Status
-
-This is the lean, high-performance core. Current scope:
-
-- Plaintext only; TLS is not yet on this path.
-- The zero-allocation typed fast path covers `Int64`; a generalized
-  `queryScalar<T>` / typed-row family is planned.
-- `query(_:)` binds parameters over the extended protocol with text results and
-  decodes rows into `Decodable` types; binary result encoding to bring it onto
-  the scalar fast path's ceiling is planned.
