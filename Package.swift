@@ -99,6 +99,11 @@ let package = Package(
             exclude: ["README.md"],
             plugins: integrityPlugins
         ),
+        .testTarget(
+            name: "DXPostgresTests",
+            dependencies: ["DXPostgres"],
+            plugins: integrityPlugins
+        ),
         .target(
             name: "DXClickHouse",
             dependencies: [
