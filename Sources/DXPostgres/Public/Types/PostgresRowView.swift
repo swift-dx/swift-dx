@@ -37,7 +37,7 @@ public struct PostgresRowView {
     }
 
     public func bytes(_ index: Int) throws(PostgresError) -> [UInt8] {
-        let field = locate(index)
+        let field = try boundsCheckedField(index)
         guard field.length >= 0 else { throw PostgresError.columnIsNull(column: "\(index)") }
         guard let raw = buffer.getBytes(at: field.valueStart, length: field.length) else {
             throw PostgresError.protocolError(reason: "truncated field at column \(index)")
@@ -46,7 +46,7 @@ public struct PostgresRowView {
     }
 
     public func text(_ index: Int) throws(PostgresError) -> String {
-        let field = locate(index)
+        let field = try boundsCheckedField(index)
         guard field.length >= 0 else { throw PostgresError.columnIsNull(column: "\(index)") }
         guard let value = buffer.getString(at: field.valueStart, length: field.length) else {
             throw PostgresError.utf8DecodingFailed
@@ -55,18 +55,37 @@ public struct PostgresRowView {
     }
 
     public func int64(_ index: Int) throws(PostgresError) -> Int64 {
-        let field = locate(index)
+        let field = try boundsCheckedField(index)
         guard field.length >= 0 else { throw PostgresError.columnIsNull(column: "\(index)") }
+        return decimalInt64(valueStart: field.valueStart, length: field.length)
+    }
+
+    private func decimalInt64(valueStart: Int, length: Int) -> Int64 {
+        let negative = byte(at: valueStart) == 0x2D
+        let negativeMagnitude = negativeDecimal(from: negative ? valueStart + 1 : valueStart, end: valueStart + length)
+        return negative ? negativeMagnitude : -negativeMagnitude
+    }
+
+    private func negativeDecimal(from start: Int, end: Int) -> Int64 {
         var value: Int64 = 0
-        var cursor = field.valueStart
-        let end = field.valueStart + field.length
-        let negative = (buffer.getInteger(at: cursor, as: UInt8.self) ?? 0) == 0x2D
-        if negative { cursor += 1 }
+        var cursor = start
         while cursor < end {
-            value = value * 10 + Int64((buffer.getInteger(at: cursor, as: UInt8.self) ?? 0x30) &- 0x30)
+            value = value * 10 - Int64(byte(at: cursor) &- 0x30)
             cursor += 1
         }
-        return negative ? -value : value
+        return value
+    }
+
+    private func byte(at offset: Int) -> UInt8 {
+        buffer.getInteger(at: offset, as: UInt8.self) ?? 0
+    }
+
+    private func boundsCheckedField(_ index: Int) throws(PostgresError) -> (valueStart: Int, length: Int) {
+        let count = fieldCount
+        guard index >= 0, index < count else {
+            throw PostgresError.columnIndexOutOfRange(index: index, columnCount: count)
+        }
+        return locate(index)
     }
 
     private func locate(_ index: Int) -> (valueStart: Int, length: Int) {
