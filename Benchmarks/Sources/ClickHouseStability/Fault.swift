@@ -317,7 +317,7 @@ enum StabilityFault {
                 return ScenarioResult(id: "F4_pool_exhaustion", passed: false, detail: "acquireTimedOut fired at \(elapsedMicroseconds)us; outside window 400ms..5s")
             }
             return ScenarioResult(id: "F4_pool_exhaustion", passed: true, detail: "typed acquireTimedOut after \(elapsedMicroseconds / 1_000)ms")
-        case .poolClosed, .openFailed, .allEndpointsFailed:
+        case .poolClosed, .openFailed, .allEndpointsFailed, .invalidConfiguration:
             return ScenarioResult(id: "F4_pool_exhaustion", passed: false, detail: "unexpected typed failure: \(failure)")
         }
     }

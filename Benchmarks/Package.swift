@@ -54,6 +54,61 @@ let package = Package(
             ]
         ),
         .executableTarget(
+            name: "WireDump",
+            dependencies: [
+                .product(name: "DXClickHouse", package: "swift-dx"),
+            ],
+            path: "Sources/WireDump"
+        ),
+        .executableTarget(
+            name: "ClickHouseCompareBenchmark",
+            dependencies: [
+                .product(name: "DXClickHouse", package: "swift-dx"),
+            ],
+            path: "Sources/ClickHouseCompare",
+            swiftSettings: [
+                .unsafeFlags(
+                    [
+                        "-enforce-exclusivity=unchecked",
+                        "-cross-module-optimization",
+                    ],
+                    .when(configuration: .release)
+                ),
+            ]
+        ),
+        .executableTarget(
+            name: "ClickHouseWriteProfile",
+            dependencies: [
+                .product(name: "DXClickHouse", package: "swift-dx"),
+            ],
+            path: "Sources/ClickHouseWriteProfile",
+            swiftSettings: [
+                .unsafeFlags(
+                    [
+                        "-enforce-exclusivity=unchecked",
+                        "-cross-module-optimization",
+                    ],
+                    .when(configuration: .release)
+                ),
+            ]
+        ),
+        .executableTarget(
+            name: "ClickHouseReadProfile",
+            dependencies: [
+                .product(name: "DXClickHouse", package: "swift-dx"),
+            ],
+            path: "Sources/ClickHouseReadProfile",
+            swiftSettings: [
+                .unsafeFlags(
+                    [
+                        "-enforce-exclusivity=unchecked",
+                        "-cross-module-optimization",
+                    ],
+                    .when(configuration: .release)
+                ),
+            ]
+        ),
+        .executableTarget(
             name: "ClickHouseAsyncBenchmark",
             dependencies: [
                 .product(name: "DXClickHouse", package: "swift-dx"),
@@ -136,11 +191,11 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "PostgresBenchmark",
+            name: "PostgresLeanBenchmark",
             dependencies: [
                 .product(name: "DXPostgres", package: "swift-dx"),
             ],
-            path: "Sources/Postgres",
+            path: "Sources/PostgresLean",
             swiftSettings: [
                 .unsafeFlags(
                     [
