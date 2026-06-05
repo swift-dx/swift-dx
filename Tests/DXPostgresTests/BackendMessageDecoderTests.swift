@@ -67,6 +67,35 @@ import NIOCore
         #expect(payload == "")
     }
 
+    @Test func rejectsMessageLengthBelowMinimum() throws {
+        let buffer = bufferOf([0x5A, 0x00, 0x00, 0x00, 0x03])
+        #expect(throws: PostgresError.self) {
+            _ = try BackendMessageDecoder.decodeOne(from: buffer)
+        }
+    }
+
+    @Test func rejectsUnknownMessageTag() throws {
+        let buffer = bufferOf(message(0xFF, []))
+        #expect(throws: PostgresError.self) {
+            _ = try BackendMessageDecoder.decodeOne(from: buffer)
+        }
+    }
+
+    @Test func rejectsUnterminatedCString() throws {
+        let buffer = bufferOf(message(0x43, Array("SELECT 1".utf8)))
+        #expect(throws: PostgresError.self) {
+            _ = try BackendMessageDecoder.decodeOne(from: buffer)
+        }
+    }
+
+    @Test func rejectsTruncatedDataRowColumn() throws {
+        let body = bigEndianInt16(1) + bigEndianInt32(10) + Array("ab".utf8)
+        let buffer = bufferOf(message(0x44, body))
+        #expect(throws: PostgresError.self) {
+            _ = try BackendMessageDecoder.decodeOne(from: buffer)
+        }
+    }
+
     private func bufferOf(_ bytes: [UInt8]) -> ByteBuffer {
         var buffer = ByteBufferAllocator().buffer(capacity: bytes.count)
         buffer.writeBytes(bytes)
