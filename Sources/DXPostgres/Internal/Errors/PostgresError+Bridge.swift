@@ -20,16 +20,18 @@ extension PostgresError {
     static func bridge<Value>(_ body: () async throws -> Value) async throws(PostgresError) -> Value {
         do {
             return try await body()
-        } catch let error as PostgresError {
-            throw error
         } catch {
-            throw PostgresError.transportError(reason: String(describing: error))
+            throw translate(error)
         }
     }
 
     // Narrows an arbitrary error to the typed surface without an async boundary,
-    // used by the retry loop when classifying a caught failure.
+    // used by the retry loop when classifying a caught failure. A cooperative
+    // cancellation becomes `.cancelled` so it is neither retried nor mistaken for
+    // a transport failure; anything else unknown is reported as a transport error.
     static func translate(_ error: Error) -> PostgresError {
-        (error as? PostgresError) ?? .transportError(reason: String(describing: error))
+        if let postgres = error as? PostgresError { return postgres }
+        if error is CancellationError { return .cancelled }
+        return .transportError(reason: String(describing: error))
     }
 }
