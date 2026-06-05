@@ -32,6 +32,19 @@ public struct PostgresLeasedConnection {
         try connection.execute(sql, onRow: onRow)
     }
 
+    public func query(_ statement: PostgresStatement) throws(PostgresError) -> PostgresResult {
+        try connection.query(statement.sql, bindings: statement.bindings)
+    }
+
+    public func query<T: Decodable>(_ statement: PostgresStatement, as type: T.Type) throws(PostgresError) -> [T] {
+        try connection.query(statement.sql, bindings: statement.bindings).decode(as: type)
+    }
+
+    @discardableResult
+    public func query(_ statement: PostgresStatement, onRow: (PostgresRowView) throws(PostgresError) -> Void) throws(PostgresError) -> [PostgresColumn] {
+        try connection.query(statement.sql, bindings: statement.bindings, onRow: onRow)
+    }
+
     public func queryScalarInt64(_ sql: String, value: Int64) throws(PostgresError) -> Int64 {
         try connection.queryScalarInt64Inline(sql, value: value)
     }

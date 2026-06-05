@@ -58,6 +58,24 @@ extension Postgres {
         return try PostgresListener(connection: connection, channels: channels)
     }
 
+    /// Subscribes to `channels` using the same connection settings as a pooled
+    /// client, so a listener and a pool can share one `PostgresConfiguration`. A
+    /// listener still opens its own dedicated connection, since it parks in a
+    /// receive loop and cannot be borrowed from the pool.
+    public static func listen(_ configuration: PostgresConfiguration, channels: [String]) throws(PostgresError) -> PostgresListener {
+        try listen(host: configuration.host, port: configuration.port, username: configuration.username, password: configuration.password, database: configuration.database, applicationName: configuration.applicationName, channels: channels)
+    }
+
+    /// Watches `table` using a shared ``PostgresConfiguration``.
+    public static func watchTable(_ configuration: PostgresConfiguration, table: String, channel: String) throws(PostgresError) -> PostgresListener {
+        try watchTable(host: configuration.host, port: configuration.port, username: configuration.username, password: configuration.password, database: configuration.database, applicationName: configuration.applicationName, table: table, channel: channel)
+    }
+
+    /// Watches `table` for rows matching `filter`, using a shared ``PostgresConfiguration``.
+    public static func watchTable(_ configuration: PostgresConfiguration, table: String, channel: String, where filter: String) throws(PostgresError) -> PostgresListener {
+        try watchTable(host: configuration.host, port: configuration.port, username: configuration.username, password: configuration.password, database: configuration.database, applicationName: configuration.applicationName, table: table, channel: channel, where: filter)
+    }
+
     /// Installs an AFTER INSERT/UPDATE/DELETE trigger on `table` that publishes each
     /// changed row as JSON (`{"op":…, "row":…}`) on `channel`, then returns a
     /// listener subscribed to that channel. Fires for every changed row.

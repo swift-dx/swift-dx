@@ -20,7 +20,19 @@ public protocol PostgresClient: Sendable {
     /// with the rows, each field being its raw wire bytes or SQL NULL.
     func execute(_ sql: String) async throws(PostgresError) -> PostgresResult
 
+    /// Submits a parameterized statement whose interpolated values were bound, not
+    /// spliced, and returns the result.
+    func query(_ statement: PostgresStatement) async throws(PostgresError) -> PostgresResult
+
     /// Releases every pooled connection. Call once when the client is no longer
     /// needed; in-flight statements should complete first.
     func shutdown()
+}
+
+extension PostgresClient {
+
+    /// Runs a parameterized statement and decodes every row into `type`.
+    public func query<T: Decodable & Sendable>(_ statement: PostgresStatement, as type: T.Type) async throws(PostgresError) -> [T] {
+        try await query(statement).decode(as: type)
+    }
 }

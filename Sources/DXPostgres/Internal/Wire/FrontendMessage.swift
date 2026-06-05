@@ -141,6 +141,17 @@ enum FrontendMessage {
         buffer.backpatchLength(at: lengthIndex)
     }
 
+    static func appendBindTextResult(into buffer: inout ByteBuffer, statementName: String, parameters: [PostgresCell]) {
+        let lengthIndex = buffer.writeMessageLengthPrefix(tag: tagBind)
+        buffer.writeCString("")
+        buffer.writeCString(statementName)
+        buffer.writeInteger(Int16(1))
+        buffer.writeInteger(textFormatCode)
+        writeBindParameters(into: &buffer, parameters: parameters)
+        buffer.writeInteger(Int16(0))
+        buffer.backpatchLength(at: lengthIndex)
+    }
+
     static func appendBindInt64(into buffer: inout ByteBuffer, statementName: String, value: Int64) {
         let lengthIndex = buffer.writeMessageLengthPrefix(tag: tagBind)
         buffer.writeCString("")

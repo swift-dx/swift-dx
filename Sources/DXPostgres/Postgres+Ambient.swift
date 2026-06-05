@@ -58,4 +58,14 @@ extension Postgres {
     public static func execute(_ sql: String) async throws(PostgresError) -> PostgresResult {
         try await current().execute(sql)
     }
+
+    /// Runs a parameterized statement on the ambient client.
+    public static func query(_ statement: PostgresStatement) async throws(PostgresError) -> PostgresResult {
+        try await current().query(statement)
+    }
+
+    /// Runs a parameterized statement on the ambient client and decodes the rows.
+    public static func query<T: Decodable & Sendable>(_ statement: PostgresStatement, as type: T.Type) async throws(PostgresError) -> [T] {
+        try await current().query(statement, as: type)
+    }
 }

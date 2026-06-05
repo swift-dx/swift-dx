@@ -70,6 +70,18 @@ public final class PostgresLeasePool: @unchecked Sendable {
         }
     }
 
+    public func query(_ statement: PostgresStatement) async throws(PostgresError) -> PostgresResult {
+        do {
+            return try await withConnection { connection in
+                try connection.query(statement)
+            }
+        } catch let error as PostgresError {
+            throw error
+        } catch {
+            throw PostgresError.transportError(reason: "\(error)")
+        }
+    }
+
     public func shutdown() {
         for worker in workers { worker.stop() }
     }

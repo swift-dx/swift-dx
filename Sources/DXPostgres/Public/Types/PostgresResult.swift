@@ -29,4 +29,26 @@ public struct PostgresResult: Sendable, Equatable {
         for index in columns.indices where columns[index].name == name { return index }
         throw PostgresError.columnNameNotFound(name: name)
     }
+
+    /// Decodes every row into `type` by matching each property's coding key to a
+    /// column name. Throws ``PostgresError/typeDecodingFailed(type:reason:)`` if a
+    /// value does not fit the property's type.
+    public func decode<T: Decodable>(as type: T.Type) throws(PostgresError) -> [T] {
+        var columnIndex: [String: Int] = [:]
+        for index in columns.indices {
+            columnIndex[columns[index].name] = index
+        }
+        do {
+            var decoded: [T] = []
+            decoded.reserveCapacity(rows.count)
+            for row in rows {
+                decoded.append(try T(from: PostgresRowDecoder(row: row, columnIndex: columnIndex)))
+            }
+            return decoded
+        } catch let error as PostgresError {
+            throw error
+        } catch {
+            throw PostgresError.typeDecodingFailed(type: "\(T.self)", reason: "\(error)")
+        }
+    }
 }

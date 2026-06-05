@@ -205,6 +205,28 @@ private func runWatchDemo() async throws {
     listener.close()
 }
 
+private struct DemoAccount: Decodable, Sendable {
+    let id: Int
+    let email: String
+    let active: Bool
+}
+
+private func runTypedDemo() async throws {
+    let postgres = try Postgres.connect(PostgresConfiguration(host: host, port: port, username: username, password: password, database: database, applicationName: "dxtyped", poolSize: 2))
+    defer { postgres.shutdown() }
+    // The interpolated value is an injection attempt; it is bound as $1, returned
+    // verbatim as data, and never executed.
+    let email = "alice'); DROP TABLE users;--"
+    let accounts: [DemoAccount] = try await postgres.query(
+        "SELECT 7 AS id, \(email) AS email, \(true)::boolean AS active",
+        as: DemoAccount.self)
+    print("[TYPED DEMO] query(\"… email = \\(email) …\", as: DemoAccount.self) ->")
+    for account in accounts {
+        print("  DemoAccount(id: \(account.id), email: \(account.email), active: \(account.active))")
+    }
+    print("[TYPED DEMO] the injection string was a bound parameter, returned as data, not run")
+}
+
 private func runServiceDemo() async throws {
     // config -> Service in a ServiceGroup -> ambient client -> query -> graceful shutdown
     let configuration = PostgresConfiguration(host: host, port: port, username: username, password: password, database: database, applicationName: "dxservice", poolSize: 4)
@@ -267,6 +289,7 @@ for mode in modes {
         case "contention_pool_scalar": try await runContentionPoolScalar()
         case "lease_scalar": try await runLeaseScalar()
         case "select_demo": try await runSelectDemo()
+        case "typed_demo": try await runTypedDemo()
         case "service_demo": try await runServiceDemo()
         case "soak": try await runSoak()
         default: print("[POSTGRES PERF SWIFT] unknown mode: \(mode)")

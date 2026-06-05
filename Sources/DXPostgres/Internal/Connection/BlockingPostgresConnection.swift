@@ -107,6 +107,33 @@ final class BlockingPostgresConnection: @unchecked Sendable {
         writeScratch.clear()
         FrontendMessage.appendQuery(into: &writeScratch, sql: sql)
         try writeAll(writeScratch)
+        return try streamResult(onRow: onRow)
+    }
+
+    // Parameterized read over the extended protocol: the bound values are sent as
+    // text parameters for $1, $2, …, never spliced into the SQL, and results come
+    // back in text format streamed through the borrowed row view. The statement is
+    // parsed once and cached.
+    func query(_ sql: String, bindings: [PostgresCell], onRow: (PostgresRowView) throws(PostgresError) -> Void) throws(PostgresError) -> [PostgresColumn] {
+        let plan = planStatement(for: sql)
+        do {
+            writeScratch.clear()
+            let name = appendParseIfNeeded(plan, sql: sql, into: &writeScratch)
+            FrontendMessage.appendBindTextResult(into: &writeScratch, statementName: name, parameters: bindings)
+            if case .parse = plan {
+                FrontendMessage.appendDescribePortal(into: &writeScratch, name: "")
+            }
+            FrontendMessage.appendExecute(into: &writeScratch, portalName: "", maxRows: 0)
+            FrontendMessage.appendSync(into: &writeScratch)
+            try writeAll(writeScratch)
+            return try streamResult(onRow: onRow)
+        } catch {
+            preparedStatements.removeValue(forKey: sql)
+            throw error
+        }
+    }
+
+    private func streamResult(onRow: (PostgresRowView) throws(PostgresError) -> Void) throws(PostgresError) -> [PostgresColumn] {
         var columns: [PostgresColumn] = []
         while true {
             while readBuffer.readableBytes < 5 { try fillReadBuffer() }
@@ -142,6 +169,21 @@ final class BlockingPostgresConnection: @unchecked Sendable {
     func execute(_ sql: String) throws(PostgresError) -> PostgresResult {
         var rows: [[PostgresCell]] = []
         let columns = try execute(sql) { (view: PostgresRowView) throws(PostgresError) in
+            var cells: [PostgresCell] = []
+            cells.reserveCapacity(view.fieldCount)
+            var index = 0
+            while index < view.fieldCount {
+                cells.append(view.isNull(index) ? .sqlNull : .bytes(try view.bytes(index)))
+                index += 1
+            }
+            rows.append(cells)
+        }
+        return PostgresResult(columns: columns, rows: rows)
+    }
+
+    func query(_ sql: String, bindings: [PostgresCell]) throws(PostgresError) -> PostgresResult {
+        var rows: [[PostgresCell]] = []
+        let columns = try query(sql, bindings: bindings) { (view: PostgresRowView) throws(PostgresError) in
             var cells: [PostgresCell] = []
             cells.reserveCapacity(view.fieldCount)
             var index = 0

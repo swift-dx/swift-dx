@@ -42,6 +42,25 @@ for row in result.rows {
 `Postgres.connect` returns `some PostgresClient`; the concrete pool type stays
 hidden. Use a trust role by passing an empty password.
 
+## Parameterized and typed queries
+
+Interpolated values are bound parameters, never spliced into the SQL, and rows
+decode straight into your `Decodable` types:
+
+```swift
+struct Account: Decodable, Sendable { let id: Int; let email: String; let active: Bool }
+
+let email = userInput   // even an injection string is just data
+let accounts = try await postgres.query(
+    "SELECT id, email, active FROM accounts WHERE email = \(email)",
+    as: Account.self
+)
+```
+
+Each `\(value)` becomes a `$1`, `$2`, … bound over the extended protocol. Use
+`query(statement)` for an untyped `PostgresResult`, or `result.decode(as:)` to
+decode an existing result.
+
 ## Reading results: three shapes, one core
 
 A query result is the column descriptions (name, type OID, wire format) sent
@@ -183,6 +202,6 @@ This is the lean, high-performance core. Current scope:
 - Plaintext only; TLS is not yet on this path.
 - The zero-allocation typed fast path covers `Int64`; a generalized
   `queryScalar<T>` / typed-row family is planned.
-- `execute` runs the simple-query protocol (text results); a prepared, binary,
-  parameterized general `query` is planned to bring the general path onto the
-  fast path's ceiling.
+- `query(_:)` binds parameters over the extended protocol with text results and
+  decodes rows into `Decodable` types; binary result encoding to bring it onto
+  the scalar fast path's ceiling is planned.
