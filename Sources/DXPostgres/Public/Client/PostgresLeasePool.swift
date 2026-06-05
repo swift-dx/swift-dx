@@ -106,6 +106,10 @@ public final class PostgresLeasePool: @unchecked Sendable {
         for waiter in parked { waiter.resume(throwing: PostgresError.poolShutdown) }
     }
 
+    deinit {
+        shutdown()
+    }
+
     private func runLeased<Result: Sendable>(_ index: Int, _ body: @escaping @Sendable (PostgresLeasedConnection) throws -> Result) async throws -> Result {
         let worker = workers[index]
         return try await withUnsafeThrowingContinuation { (continuation: UnsafeContinuation<Result, Error>) in

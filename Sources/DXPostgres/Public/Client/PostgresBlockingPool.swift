@@ -68,4 +68,8 @@ public final class PostgresBlockingPool: @unchecked Sendable {
             worker.stop()
         }
     }
+
+    deinit {
+        shutdown()
+    }
 }
