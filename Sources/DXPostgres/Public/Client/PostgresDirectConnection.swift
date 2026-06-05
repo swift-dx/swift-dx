@@ -34,6 +34,15 @@ public final class PostgresDirectConnection: @unchecked Sendable {
         PostgresDirectConnection(connection: try BlockingPostgresConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName))
     }
 
+    public func execute(_ sql: String) throws(PostgresError) -> PostgresResult {
+        try connection.execute(sql)
+    }
+
+    @discardableResult
+    public func execute(_ sql: String, onRow: (PostgresRowView) throws(PostgresError) -> Void) throws(PostgresError) -> [PostgresColumn] {
+        try connection.execute(sql, onRow: onRow)
+    }
+
     public func queryScalarInt64Inline(_ sql: String, value: Int64) throws(PostgresError) -> Int64 {
         try connection.queryScalarInt64Inline(sql, value: value)
     }

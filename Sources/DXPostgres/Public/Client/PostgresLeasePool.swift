@@ -58,6 +58,18 @@ public final class PostgresLeasePool: @unchecked Sendable {
         }
     }
 
+    public func execute(_ sql: String) async throws(PostgresError) -> PostgresResult {
+        do {
+            return try await withConnection { connection in
+                try connection.execute(sql)
+            }
+        } catch let error as PostgresError {
+            throw error
+        } catch {
+            throw PostgresError.transportError(reason: "\(error)")
+        }
+    }
+
     public func shutdown() {
         for worker in workers { worker.stop() }
     }
@@ -100,3 +112,5 @@ public final class PostgresLeasePool: @unchecked Sendable {
         waiter?.resume(returning: index)
     }
 }
+
+extension PostgresLeasePool: PostgresClient {}

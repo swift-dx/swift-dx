@@ -23,6 +23,15 @@ public struct PostgresLeasedConnection {
         self.connection = connection
     }
 
+    public func execute(_ sql: String) throws(PostgresError) -> PostgresResult {
+        try connection.execute(sql)
+    }
+
+    @discardableResult
+    public func execute(_ sql: String, onRow: (PostgresRowView) throws(PostgresError) -> Void) throws(PostgresError) -> [PostgresColumn] {
+        try connection.execute(sql, onRow: onRow)
+    }
+
     public func queryScalarInt64(_ sql: String, value: Int64) throws(PostgresError) -> Int64 {
         try connection.queryScalarInt64Inline(sql, value: value)
     }

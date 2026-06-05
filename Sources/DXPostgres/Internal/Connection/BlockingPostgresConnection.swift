@@ -94,6 +94,97 @@ final class BlockingPostgresConnection: @unchecked Sendable {
         }
     }
 
+    // Submits any statement over the simple-query protocol and returns the rows
+    // exactly as the server framed them: each field is its raw wire bytes
+    // (`PostgresCell.bytes`) or `PostgresCell.sqlNull`. Simple-query results are in
+    // text format, so the bytes are the value's text rendering; the caller decodes.
+    // Streaming primitive: sends the statement, then hands each row to onRow as a
+    // borrowed view read in place from the read buffer. No per-row allocation; the
+    // caller reads only the fields it needs and copies what it keeps. Returns the
+    // column descriptions. The owned execute below is this stream collected into a
+    // PostgresResult.
+    func execute(_ sql: String, onRow: (PostgresRowView) throws(PostgresError) -> Void) throws(PostgresError) -> [PostgresColumn] {
+        writeScratch.clear()
+        FrontendMessage.appendQuery(into: &writeScratch, sql: sql)
+        try writeAll(writeScratch)
+        var columns: [PostgresColumn] = []
+        while true {
+            while readBuffer.readableBytes < 5 { try fillReadBuffer() }
+            let base = readBuffer.readerIndex
+            let length = Int(readBuffer.getInteger(at: base + 1, as: Int32.self) ?? 0)
+            let total = length + 1
+            while readBuffer.readableBytes < total { try fillReadBuffer() }
+            if (readBuffer.getInteger(at: base, as: UInt8.self) ?? 0) == 0x44 {
+                try onRow(PostgresRowView(buffer: readBuffer, base: base))
+                readBuffer.moveReaderIndex(forwardBy: total)
+                reclaimReadBuffer()
+            } else if try absorbControlMessage(into: &columns) {
+                return columns
+            }
+        }
+    }
+
+    private func absorbControlMessage(into columns: inout [PostgresColumn]) throws(PostgresError) -> Bool {
+        switch try nextMessage() {
+        case .rowDescription(let fields):
+            columns = fields.map { PostgresColumn(name: $0.name, dataTypeObjectID: $0.dataTypeObjectID, format: $0.format) }
+            return false
+        case .readyForQuery:
+            return true
+        case .error(let serverError):
+            try consumeUntilReadyForQuery()
+            throw PostgresError.server(serverError)
+        default:
+            return false
+        }
+    }
+
+    func execute(_ sql: String) throws(PostgresError) -> PostgresResult {
+        var rows: [[PostgresCell]] = []
+        let columns = try execute(sql) { (view: PostgresRowView) throws(PostgresError) in
+            var cells: [PostgresCell] = []
+            cells.reserveCapacity(view.fieldCount)
+            var index = 0
+            while index < view.fieldCount {
+                cells.append(view.isNull(index) ? .sqlNull : .bytes(try view.bytes(index)))
+                index += 1
+            }
+            rows.append(cells)
+        }
+        return PostgresResult(columns: columns, rows: rows)
+    }
+
+    func listen(_ channel: String) throws(PostgresError) {
+        writeScratch.clear()
+        FrontendMessage.appendQuery(into: &writeScratch, sql: "LISTEN \"\(channel)\"")
+        try writeAll(writeScratch)
+        while true {
+            switch try nextMessage() {
+            case .readyForQuery:
+                return
+            case .error(let serverError):
+                try consumeUntilReadyForQuery()
+                throw PostgresError.server(serverError)
+            default:
+                continue
+            }
+        }
+    }
+
+    func awaitNotification() throws(PostgresError) -> PostgresNotification {
+        while true {
+            if case .notification(let processID, let channel, let payload) = try nextMessage() {
+                return PostgresNotification(processID: processID, channel: channel, payload: payload)
+            }
+        }
+    }
+
+    private func consumeUntilReadyForQuery() throws(PostgresError) {
+        while true {
+            if case .readyForQuery = try nextMessage() { return }
+        }
+    }
+
     private func fillReadBuffer() throws(PostgresError) {
         var received = 0
         readBuffer.writeWithUnsafeMutableBytes(minimumWritableBytes: Self.receiveChunkBytes) { raw in

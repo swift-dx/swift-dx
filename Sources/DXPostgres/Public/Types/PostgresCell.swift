@@ -18,3 +18,22 @@ public enum PostgresCell: Sendable, Equatable {
     case sqlNull
     case bytes([UInt8])
 }
+
+extension PostgresCell {
+
+    public var isNull: Bool {
+        if case .sqlNull = self { return true }
+        return false
+    }
+
+    public func bytes() throws(PostgresError) -> [UInt8] {
+        switch self {
+        case .sqlNull: throw PostgresError.columnIsNull(column: "")
+        case .bytes(let raw): return raw
+        }
+    }
+
+    public func text() throws(PostgresError) -> String {
+        String(decoding: try bytes(), as: UTF8.self)
+    }
+}

@@ -93,12 +93,10 @@ enum FrontendMessage {
         return buffer
     }
 
-    static func query(_ sql: String, allocator: ByteBufferAllocator) -> ByteBuffer {
-        var buffer = allocator.buffer(capacity: sql.utf8.count + 8)
+    static func appendQuery(into buffer: inout ByteBuffer, sql: String) {
         let lengthIndex = buffer.writeMessageLengthPrefix(tag: tagQuery)
         buffer.writeCString(sql)
         buffer.backpatchLength(at: lengthIndex)
-        return buffer
     }
 
     static func parse(statementName: String, sql: String, allocator: ByteBufferAllocator) -> ByteBuffer {
