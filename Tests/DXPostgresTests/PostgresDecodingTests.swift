@@ -10,6 +10,7 @@
 //===----------------------------------------------------------------------===//
 
 import Testing
+import Foundation
 @testable import DXPostgres
 
 @Suite struct PostgresDecodingTests {
@@ -24,6 +25,24 @@ import Testing
     private struct Flag: Decodable, Equatable {
 
         let active: Bool
+    }
+
+    private struct WithTimestamp: Decodable {
+
+        let id: Int
+        let created: Date
+    }
+
+    private struct WithTags: Decodable {
+
+        let id: Int
+        let tags: [String]
+    }
+
+    private struct WithNested: Decodable {
+
+        let id: Int
+        let flag: Flag
     }
 
     private func column(_ name: String, _ oid: UInt32) -> PostgresColumn {
@@ -79,5 +98,16 @@ import Testing
     @Test func emptyResultDecodesToEmptyArray() throws {
         let result = PostgresResult(columns: [column("active", 16)], rows: [])
         #expect(try result.decode(as: Flag.self).isEmpty)
+    }
+
+    @Test func unsupportedFieldTypesThrowRatherThanCrashing() throws {
+        let timestamp = PostgresResult(columns: [column("id", 23), column("created", 1114)], rows: [[.bytes(Array("1".utf8)), .bytes(Array("2026-01-01".utf8))]])
+        #expect(throws: PostgresError.self) { try timestamp.decode(as: WithTimestamp.self) }
+
+        let tags = PostgresResult(columns: [column("id", 23), column("tags", 1009)], rows: [[.bytes(Array("1".utf8)), .bytes(Array("{a,b}".utf8))]])
+        #expect(throws: PostgresError.self) { try tags.decode(as: WithTags.self) }
+
+        let nested = PostgresResult(columns: [column("id", 23), column("flag", 16)], rows: [[.bytes(Array("1".utf8)), .bytes(Array("t".utf8))]])
+        #expect(throws: PostgresError.self) { try nested.decode(as: WithNested.self) }
     }
 }
