@@ -91,7 +91,11 @@ struct PostgresRowKeyedContainer<Key: CodingKey>: KeyedDecodingContainerProtocol
     private func text(_ key: Key) throws -> String {
         switch try cell(key) {
         case .sqlNull: throw DecodingError.valueNotFound(String.self, .init(codingPath: codingPath + [key], debugDescription: "column \(key.stringValue) is NULL"))
-        case .bytes(let bytes): return String(decoding: bytes, as: UTF8.self)
+        case .bytes(let bytes):
+            guard let string = String(validating: bytes, as: UTF8.self) else {
+                throw DecodingError.dataCorrupted(.init(codingPath: codingPath + [key], debugDescription: "column \(key.stringValue) is not valid UTF-8"))
+            }
+            return string
         }
     }
 

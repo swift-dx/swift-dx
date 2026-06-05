@@ -74,6 +74,14 @@ import Foundation
         }
     }
 
+    @Test func decodingInvalidUTF8IntoAStringFieldThrows() {
+        let result = PostgresResult(
+            columns: [column("id", 23), column("email", 25), column("active", 16)],
+            rows: [[.bytes(Array("7".utf8)), .bytes([0xFF, 0xFE]), .bytes(Array("t".utf8))]]
+        )
+        #expect(throws: PostgresError.self) { try result.decode(as: Account.self) }
+    }
+
     @Test func columnIndexLookup() throws {
         let result = PostgresResult(columns: [column("id", 23), column("email", 25)], rows: [])
         #expect(try result.columnIndex(named: "email") == 1)
