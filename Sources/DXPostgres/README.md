@@ -48,7 +48,12 @@ Interpolated values are bound parameters, never spliced into the SQL, and rows
 decode straight into your `Decodable` types:
 
 ```swift
-struct Account: Decodable, Sendable { let id: Int; let email: String; let active: Bool }
+struct Account: Decodable, Sendable {
+
+    let id: Int
+    let email: String
+    let active: Bool
+}
 
 let email = userInput   // even an injection string is just data
 let accounts = try await postgres.query(

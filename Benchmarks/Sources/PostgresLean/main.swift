@@ -206,6 +206,7 @@ private func runWatchDemo() async throws {
 }
 
 private struct DemoAccount: Decodable, Sendable {
+
     let id: Int
     let email: String
     let active: Bool

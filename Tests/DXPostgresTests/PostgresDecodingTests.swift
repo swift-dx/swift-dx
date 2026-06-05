@@ -15,6 +15,7 @@ import Testing
 @Suite struct PostgresDecodingTests {
 
     private struct Account: Decodable, Equatable {
+
         let id: Int
         let email: String
         let active: Bool
