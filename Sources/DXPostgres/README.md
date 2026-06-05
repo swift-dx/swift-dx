@@ -51,45 +51,60 @@ let configuration = PostgresConfiguration(
 )
 ```
 
-For a script or a one-off tool, open a client and shut it down when done:
+Open the pool once and **bind it as the ambient client**. From then on, code
+anywhere in that task tree calls `Postgres` directly — it never sees the instance
+or a connection.
 
-```swift
-let postgres = try Postgres.connect(configuration)
-defer { postgres.shutdown() }
-```
-
-For a server, run the client as a ServiceLifecycle `Service` so the pool is torn
-down on graceful shutdown, and bind it as the ambient client so code anywhere in
-the task tree can reach it without being handed the pool:
+In a server, run the pool as a ServiceLifecycle `Service` (so it is torn down on
+`SIGTERM`/`SIGINT`) and bind it for the lifetime of the group:
 
 ```swift
 let postgres = try Postgres.service(configuration)
 let group = ServiceGroup(services: [postgres, httpServer], logger: logger)
 
-try await Postgres.withCurrent(postgres) {
+try await Postgres.withCurrent(postgres) {   // bound for everything run inside
     try await group.run()
 }
+```
 
-// Anywhere inside that task tree — nobody had to pass the pool around:
+ServiceLifecycle is not required. In a script, CLI, worker, or test, bind a
+plain client around your work the same way:
+
+```swift
+let postgres = try Postgres.connect(configuration)
+defer { postgres.shutdown() }
+
+try await Postgres.withCurrent(postgres) {
+    try await runApp()
+}
+```
+
+Either way, anywhere inside the bound body — no instance passed, no connection in
+sight:
+
+```swift
 func activeUsers() async throws -> PostgresResult {
     try await Postgres.execute("SELECT count(*) FROM users WHERE active")
 }
 ```
 
-`Postgres.connect`/`service` return `some PostgresClient`; the concrete pool type
-stays hidden. `Postgres.current()` returns the bound ambient client, or throws
-`PostgresError.noCurrentClient` when nothing is bound — no null, no trap.
+`Postgres.connect`/`service` return `some PostgresClient`, so the concrete pool
+type stays hidden, and `Postgres.current()` throws
+`PostgresError.noCurrentClient` if nothing is bound — no null, no trap. If you
+prefer an explicit handle — for code outside the bound task tree, such as a
+`Task.detached` — keep the returned value and call `postgres.execute` /
+`postgres.query` / `postgres.transaction` on it directly.
 
 ## Running queries
 
 ```swift
 // Raw statement, owned result:
-let result = try await postgres.execute("SELECT id, email FROM users")
+let result = try await Postgres.execute("SELECT id, email FROM users")
 
 // Parameterized — interpolated values are bound parameters, never spliced into
 // the SQL, so even an injection string is just data:
 let email = userInput
-let rows = try await postgres.query("SELECT id, email FROM users WHERE email = \(email)")
+let rows = try await Postgres.query("SELECT id, email FROM users WHERE email = \(email)")
 
 // Decoded straight into your Decodable type:
 struct Account: Decodable, Sendable {
@@ -99,7 +114,7 @@ struct Account: Decodable, Sendable {
     let active: Bool
 }
 
-let accounts = try await postgres.query(
+let accounts = try await Postgres.query(
     "SELECT id, email, active FROM accounts WHERE email = \(email)",
     as: Account.self
 )
@@ -116,7 +131,7 @@ once, paired with rows. Each field is a `PostgresCell` — `.bytes([UInt8])` or
 `.sqlNull`, a named value rather than an optional:
 
 ```swift
-let result = try await postgres.execute("SELECT id, email FROM users")
+let result = try await Postgres.execute("SELECT id, email FROM users")
 let emailColumn = try result.columnIndex(named: "email")
 for row in result.rows {
     let id = try row[0].text()
@@ -148,14 +163,14 @@ the closure commits; throwing rolls back and rethrows your error. There is no
 connection to acquire, hold, or release — that is handled for you.
 
 ```swift
-try await postgres.transaction { tx in
+try await Postgres.transaction { tx in
     try tx.execute("UPDATE accounts SET balance = balance - \(amount) WHERE id = \(from)")
     try tx.execute("UPDATE accounts SET balance = balance + \(amount) WHERE id = \(to)")
 }   // committed on return; rolled back if either statement, or your own check, throws
 
 // Throw your own error to roll back and recover it unchanged:
 do {
-    try await postgres.transaction { tx in
+    try await Postgres.transaction { tx in
         let balance = try tx.queryScalarInt64("SELECT balance FROM accounts WHERE id = \(from)::int8", value: 0)
         guard balance >= amount else { throw PaymentError.insufficientFunds }
         try tx.execute("UPDATE accounts SET balance = balance - \(amount) WHERE id = \(from)")
@@ -165,10 +180,10 @@ do {
 }
 ```
 
-The same statements are available on `tx` as on the client — `execute`, `query`,
+The same statements are available on `tx` as on `Postgres` — `execute`, `query`,
 `query(_:as:)` — so a transaction reads exactly like ad-hoc work, just grouped.
-Through the ambient client it is `Postgres.transaction { tx in … }`, with no
-client or connection passed in.
+If you hold an explicit client instead of using the ambient one, it is the same
+call on the instance: `client.transaction { tx in … }`.
 
 ## Subscriptions
 
