@@ -89,14 +89,29 @@ public final class PostgresLeasePool: @unchecked Sendable {
     private func runLeased<Result: Sendable>(_ index: Int, _ body: @escaping @Sendable (PostgresLeasedConnection) throws -> Result) async throws -> Result {
         let worker = workers[index]
         return try await withUnsafeThrowingContinuation { (continuation: UnsafeContinuation<Result, Error>) in
-            worker.submitJob {
+            let accepted = worker.submitJob {
                 do {
                     continuation.resume(returning: try body(PostgresLeasedConnection(connection: worker.connection)))
                 } catch {
                     continuation.resume(throwing: error)
                 }
             }
+            if !accepted {
+                continuation.resume(throwing: PostgresError.poolShutdown)
+            }
         }
+    }
+
+    private enum Acquisition {
+
+        case leased(Int)
+        case parked
+    }
+
+    private enum Release {
+
+        case returnedToFreeList
+        case handoff(UnsafeContinuation<Int, Never>)
     }
 
     private func acquire() async -> Int {
@@ -104,24 +119,24 @@ public final class PostgresLeasePool: @unchecked Sendable {
             return index
         }
         return await withUnsafeContinuation { continuation in
-            let ready: Int? = state.withLock {
-                if let index = $0.free.popLast() { return index }
+            let outcome: Acquisition = state.withLock {
+                if let index = $0.free.popLast() { return .leased(index) }
                 $0.waiters.append(continuation)
-                return nil
+                return .parked
             }
-            if let index = ready { continuation.resume(returning: index) }
+            if case .leased(let index) = outcome { continuation.resume(returning: index) }
         }
     }
 
     private func release(_ index: Int) {
-        let waiter: UnsafeContinuation<Int, Never>? = state.withLock {
+        let outcome: Release = state.withLock {
             if $0.waiters.isEmpty {
                 $0.free.append(index)
-                return nil
+                return .returnedToFreeList
             }
-            return $0.waiters.removeFirst()
+            return .handoff($0.waiters.removeFirst())
         }
-        waiter?.resume(returning: index)
+        if case .handoff(let waiter) = outcome { waiter.resume(returning: index) }
     }
 }
 

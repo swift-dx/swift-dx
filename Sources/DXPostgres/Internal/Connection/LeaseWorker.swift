@@ -51,12 +51,17 @@ final class LeaseWorker: @unchecked Sendable {
         thread.start()
     }
 
-    func submitJob(_ job: @escaping @Sendable () -> Void) {
+    func submitJob(_ job: @escaping @Sendable () -> Void) -> Bool {
         pthread_mutex_lock(mutex)
+        guard !stopped else {
+            pthread_mutex_unlock(mutex)
+            return false
+        }
         let wasIdle = pending.isEmpty
         pending.append(job)
         if wasIdle { pthread_cond_signal(jobAvailable) }
         pthread_mutex_unlock(mutex)
+        return true
     }
 
     func stop() {
@@ -77,10 +82,14 @@ final class LeaseWorker: @unchecked Sendable {
     private func swapInJobs() -> Bool {
         pthread_mutex_lock(mutex)
         defer { pthread_mutex_unlock(mutex) }
-        while pending.isEmpty && !stopped { pthread_cond_wait(jobAvailable, mutex) }
+        waitForJobOrStop()
         if pending.isEmpty { return false }
         swap(&pending, &drain)
         return true
+    }
+
+    private func waitForJobOrStop() {
+        while pending.isEmpty && !stopped { pthread_cond_wait(jobAvailable, mutex) }
     }
 
     deinit {
