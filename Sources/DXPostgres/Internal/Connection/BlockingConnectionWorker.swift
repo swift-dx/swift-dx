@@ -60,12 +60,17 @@ final class BlockingConnectionWorker: @unchecked Sendable {
         thread.start()
     }
 
-    func submitScalar(_ work: ScalarWork) {
+    func submitScalar(_ work: ScalarWork) -> Bool {
         pthread_mutex_lock(mutex)
+        guard !stopped else {
+            pthread_mutex_unlock(mutex)
+            return false
+        }
         let wasIdle = pendingScalar.isEmpty
         pendingScalar.append(work)
         if wasIdle { pthread_cond_signal(workAvailable) }
         pthread_mutex_unlock(mutex)
+        return true
     }
 
     func stop() {
@@ -86,12 +91,16 @@ final class BlockingConnectionWorker: @unchecked Sendable {
     private func swapInPendingWork() -> Bool {
         pthread_mutex_lock(mutex)
         defer { pthread_mutex_unlock(mutex) }
-        while pendingScalar.isEmpty && !stopped {
-            pthread_cond_wait(workAvailable, mutex)
-        }
+        waitForWorkOrStop()
         if pendingScalar.isEmpty { return false }
         swap(&pendingScalar, &drainScalar)
         return true
+    }
+
+    private func waitForWorkOrStop() {
+        while pendingScalar.isEmpty && !stopped {
+            pthread_cond_wait(workAvailable, mutex)
+        }
     }
 
     private func executeScalar(_ work: ScalarWork) {
