@@ -68,6 +68,12 @@ import Foundation
         #expect(try PostgresCell.bytes(Array("42".utf8)).bytes() == Array("42".utf8))
     }
 
+    @Test func cellTextRejectsInvalidUTF8RatherThanReplacingSilently() {
+        #expect(throws: PostgresError.self) {
+            _ = try PostgresCell.bytes([0xFF, 0xFE]).text()
+        }
+    }
+
     @Test func columnIndexLookup() throws {
         let result = PostgresResult(columns: [column("id", 23), column("email", 25)], rows: [])
         #expect(try result.columnIndex(named: "email") == 1)

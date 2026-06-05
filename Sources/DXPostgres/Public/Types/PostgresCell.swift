@@ -34,6 +34,9 @@ extension PostgresCell {
     }
 
     public func text() throws(PostgresError) -> String {
-        String(decoding: try bytes(), as: UTF8.self)
+        guard let string = String(validating: try bytes(), as: UTF8.self) else {
+            throw PostgresError.utf8DecodingFailed
+        }
+        return string
     }
 }
