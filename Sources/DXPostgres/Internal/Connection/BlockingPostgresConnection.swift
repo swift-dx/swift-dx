@@ -42,7 +42,7 @@ final class BlockingPostgresConnection: @unchecked Sendable {
     private var lastInlineSQL: String = ""
     private var lastInlineName: String = ""
 
-    private init(descriptor: Int32) {
+    init(descriptor: Int32) {
         self.descriptor = descriptor
         self.readBuffer = allocator.buffer(capacity: Self.initialReadBufferBytes)
         self.writeScratch = allocator.buffer(capacity: Self.initialWriteScratchBytes)
@@ -385,6 +385,7 @@ final class BlockingPostgresConnection: @unchecked Sendable {
             let length = Int(readBuffer.getInteger(at: base + 1, as: Int32.self) ?? 0)
             let total = length + 1
             while readBuffer.readableBytes < total { try fillReadBuffer() }
+            if tag == 0x45 { try throwScalarServerError() }
             if tag == 0x44 {
                 let fieldCount = readBuffer.getInteger(at: base + 5, as: Int16.self) ?? 0
                 if fieldCount > 0, Int(readBuffer.getInteger(at: base + 7, as: Int32.self) ?? -1) == 8 {
@@ -399,6 +400,15 @@ final class BlockingPostgresConnection: @unchecked Sendable {
         return values
     }
 
+    private func throwScalarServerError() throws(PostgresError) -> Never {
+        let message = try nextMessage()
+        try consumeUntilReadyForQuery()
+        guard case .error(let serverError) = message else {
+            throw PostgresError.protocolError(reason: "expected an error response on the typed fast path")
+        }
+        throw PostgresError.server(serverError)
+    }
+
     private func readScalarInt64() throws(PostgresError) -> Int64 {
         var value: Int64 = 0
         while true {
@@ -408,6 +418,7 @@ final class BlockingPostgresConnection: @unchecked Sendable {
             let length = Int(readBuffer.getInteger(at: base + 1, as: Int32.self) ?? 0)
             let total = length + 1
             while readBuffer.readableBytes < total { try fillReadBuffer() }
+            if tag == 0x45 { try throwScalarServerError() }
             if tag == 0x44 {
                 let fieldCount = readBuffer.getInteger(at: base + 5, as: Int16.self) ?? 0
                 if fieldCount > 0 {
