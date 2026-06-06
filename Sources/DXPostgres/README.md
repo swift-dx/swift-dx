@@ -48,7 +48,7 @@ password for a trust role.
 ```swift
 let configuration = PostgresConfiguration(
     host: "127.0.0.1", port: 5432, username: "app", password: "",
-    database: "app", applicationName: "myapp", poolSize: 8
+    database: "app", applicationName: "myapp", poolSize: 8, maxSubscriptions: 16
 )
 ```
 
@@ -252,6 +252,17 @@ ending the stream tears the subscription down. The subscription manages its own
 connection and heals itself: if the connection drops it reconnects in the
 background forever with capped backoff and re-issues every active channel before
 resuming.
+
+Because each subscription holds a dedicated connection, ambient `subscribe` and
+`watchTable` are bounded by the client's `maxSubscriptions`. Opening one past the
+limit fails fast with `PostgresError.subscriptionLimitReached`, and closing a
+subscription frees the slot — so the subscription side has a hard ceiling the same
+way `poolSize` caps the query side, and the total connection footprint stays within
+`poolSize + maxSubscriptions`. One connection can carry many channels, so prefer a
+single `subscribe(channels: […])` with several channels over one subscription per
+channel. The host- and configuration-based `subscribe`/`watchTable` overloads are
+unbounded by design — they are the explicit escape hatch for callers managing their
+own connection budget.
 
 Delivery is ephemeral and at-most-once: a notification reaches only the sessions
 listening when it is sent, is not stored, and is not replayed — a subscriber that

@@ -53,10 +53,12 @@ public final class PostgresLeasePool: @unchecked Sendable {
 
     private let workers: [LeaseWorker]
     private let source: ConnectionSource
+    private let maxSubscriptions: Int
+    private let activeSubscriptions = Mutex<Int>(0)
     private let logger: Logger
     private let state: Mutex<PoolState>
 
-    public convenience init(host: String, port: Int, username: String, password: String, database: String, applicationName: String, size: Int) throws(PostgresError) {
+    public convenience init(host: String, port: Int, username: String, password: String, database: String, applicationName: String, size: Int, maxSubscriptions: Int) throws(PostgresError) {
         let target = PostgresConnectionTarget(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName)
         let count = max(1, size)
         var connections: [BlockingPostgresConnection] = []
@@ -64,14 +66,18 @@ public final class PostgresLeasePool: @unchecked Sendable {
         for _ in 0..<count {
             connections.append(try target.connect())
         }
-        self.init(connections: connections, source: .reconnectable(target))
+        self.init(connections: connections, source: .reconnectable(target), maxSubscriptions: max(0, maxSubscriptions))
     }
 
     convenience init(connections: [BlockingPostgresConnection]) {
-        self.init(connections: connections, source: .fixed)
+        self.init(connections: connections, source: .fixed, maxSubscriptions: Int.max)
     }
 
-    private init(connections: [BlockingPostgresConnection], source: ConnectionSource) {
+    convenience init(connections: [BlockingPostgresConnection], maxSubscriptions: Int) {
+        self.init(connections: connections, source: .fixed, maxSubscriptions: maxSubscriptions)
+    }
+
+    private init(connections: [BlockingPostgresConnection], source: ConnectionSource, maxSubscriptions: Int) {
         var workers: [LeaseWorker] = []
         workers.reserveCapacity(connections.count)
         for connection in connections {
@@ -81,8 +87,22 @@ public final class PostgresLeasePool: @unchecked Sendable {
         }
         self.workers = workers
         self.source = source
+        self.maxSubscriptions = maxSubscriptions
         self.logger = Logger(label: "dx.postgres.pool")
         self.state = Mutex(PoolState(free: Array(0..<workers.count), waiters: [], healthyCount: workers.count, shuttingDown: false))
+    }
+
+    func acquireSubscriptionPermit() throws(PostgresError) -> SubscriptionPermit {
+        if state.withLock({ $0.shuttingDown }) { throw PostgresError.poolShutdown }
+        let granted = activeSubscriptions.withLock { active -> Bool in
+            guard active < maxSubscriptions else { return false }
+            active += 1
+            return true
+        }
+        guard granted else { throw PostgresError.subscriptionLimitReached(limit: maxSubscriptions) }
+        return SubscriptionPermit { [weak self] in
+            self?.activeSubscriptions.withLock { $0 -= 1 }
+        }
     }
 
     var waiterCount: Int {

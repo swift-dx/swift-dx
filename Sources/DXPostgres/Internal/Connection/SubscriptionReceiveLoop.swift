@@ -32,14 +32,16 @@ final class SubscriptionReceiveLoop: @unchecked Sendable {
     private let source: ListenerSource
     private let control: ListenerControl
     private let continuation: AsyncThrowingStream<PostgresNotification, Error>.Continuation
+    private let permit: SubscriptionPermit
     private let logger: Logger
     private var channels: Set<String>
 
-    init(connection: BlockingPostgresConnection, source: ListenerSource, control: ListenerControl, continuation: AsyncThrowingStream<PostgresNotification, Error>.Continuation, channels: Set<String>) {
+    init(connection: BlockingPostgresConnection, source: ListenerSource, control: ListenerControl, continuation: AsyncThrowingStream<PostgresNotification, Error>.Continuation, channels: Set<String>, permit: SubscriptionPermit) {
         self.currentConnection = Mutex(connection)
         self.source = source
         self.control = control
         self.continuation = continuation
+        self.permit = permit
         self.channels = channels
         self.logger = Logger(label: "dx.postgres.subscription")
     }
@@ -103,6 +105,7 @@ final class SubscriptionReceiveLoop: @unchecked Sendable {
     private func terminate() {
         currentConnection.withLock { $0.close() }
         control.close()
+        permit.release()
     }
 
     private func recover(error: PostgresError) -> ListenerRecovery {

@@ -29,6 +29,7 @@ public enum PostgresError: Error, Sendable, Equatable {
     case server(PostgresServerError)
     case poolExhausted(maxConnections: Int)
     case allConnectionsDown
+    case subscriptionLimitReached(limit: Int)
     case poolShutdown
     case poolHasNoEndpoints
     case columnIndexOutOfRange(index: Int, columnCount: Int)
@@ -59,6 +60,7 @@ extension PostgresError: CustomStringConvertible {
         case .server(let error): "PostgreSQL server error \(error.sqlState): \(error.message)"
         case .poolExhausted(let maxConnections): "no connection became available within the timeout while the pool was saturated at \(maxConnections) connections"
         case .allConnectionsDown: "every pooled connection is down; the pool is reconnecting in the background. Retry shortly"
+        case .subscriptionLimitReached(let limit): "the subscription limit of \(limit) has been reached; close a subscription before opening another"
         case .poolShutdown: "the connection pool has been shut down"
         case .poolHasNoEndpoints: "the connection pool was configured with no endpoints"
         case .columnIndexOutOfRange(let index, let columnCount): "column index \(index) is out of range for a row with \(columnCount) columns"

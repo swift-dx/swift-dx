@@ -25,7 +25,7 @@ extension PostgresError {
             true
         case .server(let serverError):
             serverError.isRetryable
-        case .handshakeFailed, .authenticationFailed, .unsupportedAuthentication, .tlsNotSupportedByServer, .timedOut, .protocolError, .poolShutdown, .poolHasNoEndpoints, .columnIndexOutOfRange, .columnNameNotFound, .columnIsNull, .typeDecodingFailed, .parameterCountMismatch, .jsonEncodingFailed, .jsonDecodingFailed, .utf8DecodingFailed, .cancelled, .noCurrentClient:
+        case .handshakeFailed, .authenticationFailed, .unsupportedAuthentication, .tlsNotSupportedByServer, .timedOut, .protocolError, .subscriptionLimitReached, .poolShutdown, .poolHasNoEndpoints, .columnIndexOutOfRange, .columnNameNotFound, .columnIsNull, .typeDecodingFailed, .parameterCountMismatch, .jsonEncodingFailed, .jsonDecodingFailed, .utf8DecodingFailed, .cancelled, .noCurrentClient:
             false
         }
     }
@@ -38,7 +38,7 @@ extension PostgresError {
         switch self {
         case .connectionClosed, .transportError:
             true
-        case .connectFailed, .handshakeFailed, .authenticationFailed, .unsupportedAuthentication, .tlsNotSupportedByServer, .timedOut, .protocolError, .server, .poolExhausted, .allConnectionsDown, .poolShutdown, .poolHasNoEndpoints, .columnIndexOutOfRange, .columnNameNotFound, .columnIsNull, .typeDecodingFailed, .parameterCountMismatch, .jsonEncodingFailed, .jsonDecodingFailed, .utf8DecodingFailed, .cancelled, .noCurrentClient:
+        case .connectFailed, .handshakeFailed, .authenticationFailed, .unsupportedAuthentication, .tlsNotSupportedByServer, .timedOut, .protocolError, .server, .poolExhausted, .allConnectionsDown, .subscriptionLimitReached, .poolShutdown, .poolHasNoEndpoints, .columnIndexOutOfRange, .columnNameNotFound, .columnIsNull, .typeDecodingFailed, .parameterCountMismatch, .jsonEncodingFailed, .jsonDecodingFailed, .utf8DecodingFailed, .cancelled, .noCurrentClient:
             false
         }
     }
@@ -55,7 +55,7 @@ extension PostgresError {
         switch self {
         case .connectionClosed, .transportError, .timedOut:
             true
-        case .connectFailed, .poolExhausted, .allConnectionsDown, .server, .handshakeFailed, .authenticationFailed, .unsupportedAuthentication, .tlsNotSupportedByServer, .protocolError, .poolShutdown, .poolHasNoEndpoints, .columnIndexOutOfRange, .columnNameNotFound, .columnIsNull, .typeDecodingFailed, .parameterCountMismatch, .jsonEncodingFailed, .jsonDecodingFailed, .utf8DecodingFailed, .cancelled, .noCurrentClient:
+        case .connectFailed, .poolExhausted, .allConnectionsDown, .subscriptionLimitReached, .server, .handshakeFailed, .authenticationFailed, .unsupportedAuthentication, .tlsNotSupportedByServer, .protocolError, .poolShutdown, .poolHasNoEndpoints, .columnIndexOutOfRange, .columnNameNotFound, .columnIsNull, .typeDecodingFailed, .parameterCountMismatch, .jsonEncodingFailed, .jsonDecodingFailed, .utf8DecodingFailed, .cancelled, .noCurrentClient:
             false
         }
     }

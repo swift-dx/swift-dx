@@ -30,6 +30,7 @@ import DXPostgres
             .server(serverError),
             .poolExhausted(maxConnections: 8),
             .allConnectionsDown,
+            .subscriptionLimitReached(limit: 16),
             .poolShutdown,
             .poolHasNoEndpoints,
             .columnIndexOutOfRange(index: 5, columnCount: 2),
@@ -66,7 +67,8 @@ import DXPostgres
         switch error {
         case .connectionClosed, .connectFailed, .handshakeFailed, .authenticationFailed,
              .unsupportedAuthentication, .tlsNotSupportedByServer, .transportError, .timedOut,
-             .protocolError, .server, .poolExhausted, .allConnectionsDown, .poolShutdown, .poolHasNoEndpoints,
+             .protocolError, .server, .poolExhausted, .allConnectionsDown, .subscriptionLimitReached,
+             .poolShutdown, .poolHasNoEndpoints,
              .columnIndexOutOfRange, .columnNameNotFound, .columnIsNull, .typeDecodingFailed,
              .parameterCountMismatch, .jsonEncodingFailed, .jsonDecodingFailed, .utf8DecodingFailed,
              .cancelled, .noCurrentClient:

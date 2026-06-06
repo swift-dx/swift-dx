@@ -10,7 +10,7 @@
 //===----------------------------------------------------------------------===//
 
 /// The client a consumer holds to talk to PostgreSQL. Obtain one from
-/// ``Postgres/connect(host:port:username:password:database:applicationName:poolSize:)``,
+/// ``Postgres/connect(host:port:username:password:database:applicationName:poolSize:maxSubscriptions:)``,
 /// share the single instance across concurrent callers, and call ``shutdown()``
 /// once at the end of its life. It is backed by a pool of connections, so each
 /// ``execute(_:)`` borrows a connection, runs the statement, and returns it.

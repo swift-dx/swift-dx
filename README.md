@@ -130,7 +130,7 @@ struct Account: Decodable, Sendable {
 
 let configuration = PostgresConfiguration(
     host: "localhost", port: 5432, username: "app", password: "secret",
-    database: "appdb", applicationName: "myapp", poolSize: 8
+    database: "appdb", applicationName: "myapp", poolSize: 8, maxSubscriptions: 16
 )
 let postgres = try Postgres.connect(configuration)
 defer { postgres.shutdown() }

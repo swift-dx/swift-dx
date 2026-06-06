@@ -124,7 +124,7 @@ private func runContentionPoolScalar() async throws {
 }
 
 private func runLeaseScalar() async throws {
-    let pool = try PostgresLeasePool(host: host, port: port, username: username, password: password, database: database, applicationName: "dxlean", size: concurrency)
+    let pool = try PostgresLeasePool(host: host, port: port, username: username, password: password, database: database, applicationName: "dxlean", size: concurrency, maxSubscriptions: 8)
     let perClient = rowCount / clients
     let start = ContinuousClock.now
     let total = try await withThrowingTaskGroup(of: Int.self, returning: Int.self) { group in
@@ -151,7 +151,7 @@ private func runLeaseScalar() async throws {
 
 private func runSelectDemo() async throws {
     // The client flow: open a client via the facade, send a statement, read back.
-    let postgres = try Postgres.connect(host: host, port: port, username: username, password: password, database: database, applicationName: "dxlean", poolSize: 4)
+    let postgres = try Postgres.connect(host: host, port: port, username: username, password: password, database: database, applicationName: "dxlean", poolSize: 4, maxSubscriptions: 8)
     defer { postgres.shutdown() }
 
     let result = try await postgres.execute("SELECT 1 AS id, 'hello world' AS label, NULL::text AS missing, 3.14 AS amount")
@@ -213,7 +213,7 @@ private struct DemoAccount: Decodable, Sendable {
 }
 
 private func runTypedDemo() async throws {
-    let postgres = try Postgres.connect(PostgresConfiguration(host: host, port: port, username: username, password: password, database: database, applicationName: "dxtyped", poolSize: 2))
+    let postgres = try Postgres.connect(PostgresConfiguration(host: host, port: port, username: username, password: password, database: database, applicationName: "dxtyped", poolSize: 2, maxSubscriptions: 8))
     defer { postgres.shutdown() }
     // The interpolated value is an injection attempt; it is bound as $1, returned
     // verbatim as data, and never executed.
@@ -230,7 +230,7 @@ private func runTypedDemo() async throws {
 
 private func runServiceDemo() async throws {
     // config -> Service in a ServiceGroup -> ambient client -> query -> graceful shutdown
-    let configuration = PostgresConfiguration(host: host, port: port, username: username, password: password, database: database, applicationName: "dxservice", poolSize: 4)
+    let configuration = PostgresConfiguration(host: host, port: port, username: username, password: password, database: database, applicationName: "dxservice", poolSize: 4, maxSubscriptions: 8)
     let pool = try Postgres.service(configuration)
     var logger = Logger(label: "dxservice")
     logger.logLevel = .error
@@ -260,7 +260,7 @@ private func residentBytes() -> Int {
 
 private func runSoak() async throws {
     let seconds = envInt("POSTGRES_BENCH_SOAK_SECONDS", 20)
-    let pool = try PostgresLeasePool(host: host, port: port, username: username, password: password, database: database, applicationName: "dxsoak", size: concurrency)
+    let pool = try PostgresLeasePool(host: host, port: port, username: username, password: password, database: database, applicationName: "dxsoak", size: concurrency, maxSubscriptions: 8)
     defer { pool.shutdown() }
     let rssStart = residentBytes()
     let start = ContinuousClock.now

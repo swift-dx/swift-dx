@@ -37,21 +37,25 @@ public final class PostgresListener: @unchecked Sendable {
     public let notifications: AsyncThrowingStream<PostgresNotification, Error>
 
     convenience init(connection: BlockingPostgresConnection, channels: [String]) throws(PostgresError) {
-        try self.init(connection: connection, source: .fixed, channels: channels)
+        try self.init(connection: connection, source: .fixed, channels: channels, permit: .unlimited())
     }
 
     convenience init(target: PostgresConnectionTarget, channels: [String]) throws(PostgresError) {
-        let connection = try target.connect()
-        try self.init(connection: connection, source: .reconnectable(target), channels: channels)
+        try self.init(target: target, channels: channels, permit: .unlimited())
     }
 
-    init(connection: BlockingPostgresConnection, source: ListenerSource, channels: [String]) throws(PostgresError) {
+    convenience init(target: PostgresConnectionTarget, channels: [String], permit: SubscriptionPermit) throws(PostgresError) {
+        let connection = try target.connect()
+        try self.init(connection: connection, source: .reconnectable(target), channels: channels, permit: permit)
+    }
+
+    init(connection: BlockingPostgresConnection, source: ListenerSource, channels: [String], permit: SubscriptionPermit) throws(PostgresError) {
         let control = try ListenerControl()
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: PostgresNotification.self, throwing: Error.self, bufferingPolicy: .bufferingNewest(Self.notificationBufferCapacity))
         for channel in channels {
             try connection.listen(channel) { continuation.yield($0) }
         }
-        let loop = SubscriptionReceiveLoop(connection: connection, source: source, control: control, continuation: continuation, channels: Set(channels))
+        let loop = SubscriptionReceiveLoop(connection: connection, source: source, control: control, continuation: continuation, channels: Set(channels), permit: permit)
         self.loop = loop
         self.notifications = stream
         continuation.onTermination = { [weak loop] _ in loop?.requestStop() }
@@ -117,7 +121,7 @@ extension Postgres {
     /// then returns a listener subscribed to that channel. Fires for every changed row.
     public static func watchTable(host: String, port: Int, username: String, password: String, database: String, applicationName: String, table: String) throws(PostgresError) -> PostgresListener {
         let target = PostgresConnectionTarget(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName)
-        return try watchTable(target: target, table: table)
+        return try watchTable(target: target, table: table, permit: .unlimited())
     }
 
     /// As ``watchTable(host:port:username:password:database:applicationName:table:)``
@@ -126,18 +130,18 @@ extension Postgres {
     /// so the client receives only matching changes.
     public static func watchTable(host: String, port: Int, username: String, password: String, database: String, applicationName: String, table: String, where filter: String) throws(PostgresError) -> PostgresListener {
         let target = PostgresConnectionTarget(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName)
-        return try watchTable(target: target, table: table, where: filter)
+        return try watchTable(target: target, table: table, where: filter, permit: .unlimited())
     }
 
-    static func watchTable(target: PostgresConnectionTarget, table: String) throws(PostgresError) -> PostgresListener {
-        try installChangeTrigger(target: target, table: table, events: "INSERT OR UPDATE OR DELETE", whenClause: "")
+    static func watchTable(target: PostgresConnectionTarget, table: String, permit: SubscriptionPermit) throws(PostgresError) -> PostgresListener {
+        try installChangeTrigger(target: target, table: table, events: "INSERT OR UPDATE OR DELETE", whenClause: "", permit: permit)
     }
 
-    static func watchTable(target: PostgresConnectionTarget, table: String, where filter: String) throws(PostgresError) -> PostgresListener {
-        try installChangeTrigger(target: target, table: table, events: "INSERT OR UPDATE", whenClause: "WHEN (\(filter)) ")
+    static func watchTable(target: PostgresConnectionTarget, table: String, where filter: String, permit: SubscriptionPermit) throws(PostgresError) -> PostgresListener {
+        try installChangeTrigger(target: target, table: table, events: "INSERT OR UPDATE", whenClause: "WHEN (\(filter)) ", permit: permit)
     }
 
-    private static func installChangeTrigger(target: PostgresConnectionTarget, table: String, events: String, whenClause: String) throws(PostgresError) -> PostgresListener {
+    private static func installChangeTrigger(target: PostgresConnectionTarget, table: String, events: String, whenClause: String, permit: SubscriptionPermit) throws(PostgresError) -> PostgresListener {
         let channel = changeChannelName(forTable: table)
         let function = "dx_notify_\(channel)"
         let trigger = "dx_trg_\(channel)"
@@ -153,7 +157,7 @@ extension Postgres {
         _ = try setup.execute("DROP TRIGGER IF EXISTS \(trigger) ON \(table)")
         _ = try setup.execute("CREATE TRIGGER \(trigger) AFTER \(events) ON \(table) FOR EACH ROW \(whenClause)EXECUTE FUNCTION \(function)()")
         setup.close()
-        return try PostgresListener(target: target, channels: [channel])
+        return try PostgresListener(target: target, channels: [channel], permit: permit)
     }
 
     private static func changeChannelName(forTable table: String) -> String {

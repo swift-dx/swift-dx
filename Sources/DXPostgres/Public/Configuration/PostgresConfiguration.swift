@@ -13,6 +13,14 @@
 /// ``Postgres/connect(_:)`` for a client, or to ``Postgres/service(_:)`` for a
 /// client that also runs as a ServiceLifecycle `Service`. The connection is
 /// plaintext; for a trust role leave `password` empty.
+///
+/// `poolSize` bounds the connections used for queries: callers above it wait for a
+/// free one. `maxSubscriptions` bounds the dedicated connections used by ambient
+/// ``Postgres/subscribe(channels:)`` and ``Postgres/watchTable(table:)``: opening
+/// one past the limit fails fast with
+/// ``PostgresError/subscriptionLimitReached(limit:)``, and a slot frees when a
+/// subscription closes. The two bound separate connection sets; the total
+/// PostgreSQL footprint is at most `poolSize + maxSubscriptions`.
 public struct PostgresConfiguration: Sendable {
 
     public let host: String
@@ -22,8 +30,9 @@ public struct PostgresConfiguration: Sendable {
     public let database: String
     public let applicationName: String
     public let poolSize: Int
+    public let maxSubscriptions: Int
 
-    public init(host: String, port: Int, username: String, password: String, database: String, applicationName: String, poolSize: Int) {
+    public init(host: String, port: Int, username: String, password: String, database: String, applicationName: String, poolSize: Int, maxSubscriptions: Int) {
         self.host = host
         self.port = port
         self.username = username
@@ -31,5 +40,6 @@ public struct PostgresConfiguration: Sendable {
         self.database = database
         self.applicationName = applicationName
         self.poolSize = poolSize
+        self.maxSubscriptions = maxSubscriptions
     }
 }

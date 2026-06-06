@@ -67,7 +67,7 @@ import Glibc
 
         let connection = BlockingPostgresConnection(descriptor: descriptors[0])
         let target = PostgresConnectionTarget(host: "127.0.0.1", port: 1, username: "x", password: "", database: "x", applicationName: "dx-test")
-        let listener = try PostgresListener(connection: connection, source: .reconnectable(target), channels: ["ch"])
+        let listener = try PostgresListener(connection: connection, source: .reconnectable(target), channels: ["ch"], permit: .unlimited())
 
         close(descriptors[1])
         try await Task.sleep(nanoseconds: 200_000_000)

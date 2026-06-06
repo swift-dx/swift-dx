@@ -17,4 +17,6 @@
 protocol PostgresSubscriptionProvider {
 
     var listenerSource: ListenerSource { get }
+
+    func acquireSubscriptionPermit() throws(PostgresError) -> SubscriptionPermit
 }

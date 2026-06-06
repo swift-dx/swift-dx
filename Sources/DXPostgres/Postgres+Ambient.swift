@@ -15,7 +15,7 @@ extension Postgres {
 
     /// Opens a pooled client from a configuration.
     public static func connect(_ configuration: PostgresConfiguration) throws(PostgresError) -> some PostgresClient {
-        try PostgresLeasePool(host: configuration.host, port: configuration.port, username: configuration.username, password: configuration.password, database: configuration.database, applicationName: configuration.applicationName, size: configuration.poolSize)
+        try PostgresLeasePool(host: configuration.host, port: configuration.port, username: configuration.username, password: configuration.password, database: configuration.database, applicationName: configuration.applicationName, size: configuration.poolSize, maxSubscriptions: configuration.maxSubscriptions)
     }
 
     /// Opens a pooled client that also runs as a ServiceLifecycle `Service`. Add the
@@ -23,7 +23,7 @@ extension Postgres {
     /// shutdown, and use the same value to run queries or bind it as the ambient
     /// client with ``withCurrent(_:_:)``.
     public static func service(_ configuration: PostgresConfiguration) throws(PostgresError) -> some PostgresClient & Service {
-        try PostgresLeasePool(host: configuration.host, port: configuration.port, username: configuration.username, password: configuration.password, database: configuration.database, applicationName: configuration.applicationName, size: configuration.poolSize)
+        try PostgresLeasePool(host: configuration.host, port: configuration.port, username: configuration.username, password: configuration.password, database: configuration.database, applicationName: configuration.applicationName, size: configuration.poolSize, maxSubscriptions: configuration.maxSubscriptions)
     }
 
     enum Ambient: Sendable {
@@ -83,27 +83,49 @@ extension Postgres {
 
     /// Subscribes to `channels` using the ambient client's connection settings, so a
     /// subscription needs no configuration of its own. The returned listener owns a
-    /// dedicated, self-healing connection separate from the pool.
+    /// dedicated, self-healing connection separate from the pool. Counts against the
+    /// client's `maxSubscriptions`; opening one past the limit throws
+    /// ``PostgresError/subscriptionLimitReached(limit:)``.
     public static func subscribe(channels: [String]) throws(PostgresError) -> PostgresListener {
-        try PostgresListener(target: subscriptionTarget(), channels: channels)
+        let claim = try acquireSubscription()
+        do {
+            return try PostgresListener(target: claim.target, channels: channels, permit: claim.permit)
+        } catch {
+            claim.permit.release()
+            throw error
+        }
     }
 
     /// Watches `table` through the ambient client, installing the change trigger and
     /// subscribing for you. The publish channel is derived from the table name.
+    /// Counts against the client's `maxSubscriptions`.
     public static func watchTable(table: String) throws(PostgresError) -> PostgresListener {
-        try watchTable(target: subscriptionTarget(), table: table)
+        let claim = try acquireSubscription()
+        do {
+            return try watchTable(target: claim.target, table: table, permit: claim.permit)
+        } catch {
+            claim.permit.release()
+            throw error
+        }
     }
 
     /// Watches `table` for rows matching `filter` through the ambient client. The
     /// filter runs in the server, so only matching changes reach the listener.
     public static func watchTable(table: String, where filter: String) throws(PostgresError) -> PostgresListener {
-        try watchTable(target: subscriptionTarget(), table: table, where: filter)
+        let claim = try acquireSubscription()
+        do {
+            return try watchTable(target: claim.target, table: table, where: filter, permit: claim.permit)
+        } catch {
+            claim.permit.release()
+            throw error
+        }
     }
 
-    private static func subscriptionTarget() throws(PostgresError) -> PostgresConnectionTarget {
+    private static func acquireSubscription() throws(PostgresError) -> (target: PostgresConnectionTarget, permit: SubscriptionPermit) {
         guard let provider = try current() as? PostgresSubscriptionProvider, case .reconnectable(let target) = provider.listenerSource else {
             throw PostgresError.noCurrentClient
         }
-        return target
+        let permit = try provider.acquireSubscriptionPermit()
+        return (target, permit)
     }
 }
