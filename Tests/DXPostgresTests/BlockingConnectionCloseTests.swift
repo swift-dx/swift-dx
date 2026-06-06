@@ -41,9 +41,13 @@ import Glibc
         #expect(socketpair(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0, &descriptors) == 0)
         defer { close(descriptors[1]) }
 
+        let flags = fcntl(descriptors[1], F_GETFL)
+        _ = fcntl(descriptors[1], F_SETFL, flags | Int32(O_NONBLOCK))
+
         openAndDrop(descriptors[0])
 
-        #expect(fcntl(descriptors[0], F_GETFD) == -1)
+        var byte: UInt8 = 0
+        #expect(read(descriptors[1], &byte, 1) == 0)
     }
 
     private func openAndDrop(_ descriptor: Int32) {
