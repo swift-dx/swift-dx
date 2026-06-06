@@ -69,6 +69,12 @@ extension Postgres {
         try await current().query(statement, as: type)
     }
 
+    /// Publishes `payload` on `channel` through the ambient client, reaching every
+    /// session currently subscribed to it.
+    public static func notify(channel: String, payload: String) async throws(PostgresError) {
+        try await current().notify(channel: channel, payload: payload)
+    }
+
     /// Runs a transaction on the ambient client: every statement on the handed-in
     /// ``PostgresTransaction`` commits together on return, or rolls back on a throw.
     public static func transaction<Result: Sendable>(_ body: @escaping @Sendable (PostgresTransaction) throws -> Result) async throws -> Result {

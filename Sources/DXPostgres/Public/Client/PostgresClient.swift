@@ -41,4 +41,14 @@ extension PostgresClient {
     public func query<T: Decodable & Sendable>(_ statement: PostgresStatement, as type: T.Type) async throws(PostgresError) -> [T] {
         try await query(statement).decode(as: type)
     }
+
+    /// Publishes `payload` on `channel` so every session subscribed to it through
+    /// ``PostgresListener`` receives the notification. Both arguments are bound as
+    /// parameters to `pg_notify`, never spliced into SQL, and the call runs on a
+    /// pooled connection — publishing needs no dedicated connection. Delivery is
+    /// ephemeral and at-most-once: a notification reaches only the sessions
+    /// listening at the moment it is sent.
+    public func notify(channel: String, payload: String) async throws(PostgresError) {
+        _ = try await query("SELECT pg_notify(\(channel), \(payload))")
+    }
 }
