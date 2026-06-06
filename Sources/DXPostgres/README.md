@@ -276,9 +276,26 @@ This is the lean, high-performance core. Current scope:
 
 `DXCore`, swift-nio (`NIOCore`, for `ByteBuffer`), swift-crypto (`Crypto`, for
 SCRAM/MD5), swift-log (`Logging`, for connection-lifecycle events such as a lost
-or recovered connection), and swift-service-lifecycle (`ServiceLifecycle`, for
-running the pool as a managed `Service`). No event loop, no atomics package, no
-TLS stack on the query path.
+or recovered connection), swift-metrics and swift-distributed-tracing (`Metrics`,
+`Tracing`, for the observability described below), and swift-service-lifecycle
+(`ServiceLifecycle`, for running the pool as a managed `Service`). No event loop,
+no atomics package, no TLS stack on the query path.
+
+## Observability
+
+The ambient `Postgres.execute` / `query` / `transaction` / `notify` surface is
+instrumented with swift-distributed-tracing and swift-metrics. Each call opens a
+client-kind span (`postgres.execute`, `postgres.query`, …) tagged with
+`db.system` and `db.operation`, increments a `postgres.operations` counter, and
+records a `postgres.operation.duration` timer; failures add to
+`postgres.operation.errors` and are recorded on the span. When an application has
+bootstrapped a tracer and a metrics backend, these are picked up automatically and
+the spans nest under the application's own; when it has not, both are no-ops.
+
+Instrumentation lives only on the ambient convenience surface. The pooled client's
+own methods, the direct connection, and the zero-allocation scalar path carry no
+telemetry, so their benchmarked throughput is unchanged — reach for those when you
+need the last microsecond, and for the ambient surface when you want the spans.
 
 ## Performance
 

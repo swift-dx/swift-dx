@@ -95,6 +95,8 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "Logging", package: "swift-log"),
+                .product(name: "Metrics", package: "swift-metrics"),
+                .product(name: "Tracing", package: "swift-distributed-tracing"),
                 .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
             ],
             exclude: ["README.md"],

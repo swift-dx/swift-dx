@@ -56,29 +56,29 @@ extension Postgres {
 
     /// Runs a statement on the ambient client bound by ``withCurrent(_:_:)``.
     public static func execute(_ sql: String) async throws(PostgresError) -> PostgresResult {
-        try await current().execute(sql)
+        try await PostgresInstrumentation.trace("execute") { try await current().execute(sql) }
     }
 
     /// Runs a parameterized statement on the ambient client.
     public static func query(_ statement: PostgresStatement) async throws(PostgresError) -> PostgresResult {
-        try await current().query(statement)
+        try await PostgresInstrumentation.trace("query") { try await current().query(statement) }
     }
 
     /// Runs a parameterized statement on the ambient client and decodes the rows.
     public static func query<T: Decodable & Sendable>(_ statement: PostgresStatement, as type: T.Type) async throws(PostgresError) -> [T] {
-        try await current().query(statement, as: type)
+        try await PostgresInstrumentation.trace("query") { try await current().query(statement, as: type) }
     }
 
     /// Publishes `payload` on `channel` through the ambient client, reaching every
     /// session currently subscribed to it.
     public static func notify(channel: String, payload: String) async throws(PostgresError) {
-        try await current().notify(channel: channel, payload: payload)
+        try await PostgresInstrumentation.trace("notify") { try await current().notify(channel: channel, payload: payload) }
     }
 
     /// Runs a transaction on the ambient client: every statement on the handed-in
     /// ``PostgresTransaction`` commits together on return, or rolls back on a throw.
     public static func transaction<Result: Sendable>(_ body: @escaping @Sendable (PostgresTransaction) throws -> Result) async throws -> Result {
-        try await current().transaction(body)
+        try await PostgresInstrumentation.traceRethrowing("transaction") { try await current().transaction(body) }
     }
 
     /// Subscribes to `channels` using the ambient client's connection settings, so a
