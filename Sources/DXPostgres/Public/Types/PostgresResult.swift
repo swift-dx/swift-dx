@@ -34,21 +34,30 @@ public struct PostgresResult: Sendable, Equatable {
     /// column name. Throws ``PostgresError/typeDecodingFailed(type:reason:)`` if a
     /// value does not fit the property's type.
     public func decode<T: Decodable>(as type: T.Type) throws(PostgresError) -> [T] {
-        var columnIndex: [String: Int] = [:]
-        for index in columns.indices {
-            columnIndex[columns[index].name] = index
-        }
+        let columnIndex = columnIndexByName()
         do {
-            var decoded: [T] = []
-            decoded.reserveCapacity(rows.count)
-            for row in rows {
-                decoded.append(try T(from: PostgresRowDecoder(row: row, columnIndex: columnIndex)))
-            }
-            return decoded
+            return try decodeRows(as: type, columnIndex: columnIndex)
         } catch let error as PostgresError {
             throw error
         } catch {
             throw PostgresError.typeDecodingFailed(type: "\(T.self)", reason: "\(error)")
         }
+    }
+
+    private func columnIndexByName() -> [String: Int] {
+        var columnIndex: [String: Int] = [:]
+        for index in columns.indices {
+            columnIndex[columns[index].name] = index
+        }
+        return columnIndex
+    }
+
+    private func decodeRows<T: Decodable>(as type: T.Type, columnIndex: [String: Int]) throws -> [T] {
+        var decoded: [T] = []
+        decoded.reserveCapacity(rows.count)
+        for row in rows {
+            decoded.append(try T(from: PostgresRowDecoder(row: row, columnIndex: columnIndex)))
+        }
+        return decoded
     }
 }

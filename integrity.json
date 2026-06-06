@@ -255,7 +255,7 @@
       "reason": "respondToAuthentication dispatches on the authentication-method enum the server selected (ok ends the exchange, cleartext/md5 send a password message, SASL runs the SCRAM sub-exchange, an unsupported method fails with its code). Each branch delegates to a single small helper; the switch is the one authoritative router for which credential flow the server demanded."
     },
     {
-      "path": "Sources/DXPostgres/Public/Client/PostgresClient+Service.swift",
+      "path": "Sources/DXPostgres/Public/Client/PostgresLeasePool+Service.swift",
       "rules": [
         "S010"
       ],
