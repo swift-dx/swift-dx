@@ -21,11 +21,24 @@ extension PostgresError {
     // here rather than silently defaulting to non-transient.
     var isTransient: Bool {
         switch self {
-        case .connectionClosed, .connectFailed, .transportError, .poolExhausted:
+        case .connectionClosed, .connectFailed, .transportError, .poolExhausted, .allConnectionsDown:
             true
         case .server(let serverError):
             serverError.isRetryable
         case .handshakeFailed, .authenticationFailed, .unsupportedAuthentication, .tlsNotSupportedByServer, .timedOut, .protocolError, .poolShutdown, .poolHasNoEndpoints, .columnIndexOutOfRange, .columnNameNotFound, .columnIsNull, .typeDecodingFailed, .parameterCountMismatch, .jsonEncodingFailed, .jsonDecodingFailed, .utf8DecodingFailed, .cancelled, .noCurrentClient:
+            false
+        }
+    }
+
+    // Whether the failure means the connection itself is broken and must be torn
+    // down and rebuilt rather than returned to the pool: a send or receive failed,
+    // or the peer closed the socket. A server error or a caller mistake leaves the
+    // connection usable, so those return false and the connection is reused.
+    var isConnectionFatal: Bool {
+        switch self {
+        case .connectionClosed, .transportError:
+            true
+        case .connectFailed, .handshakeFailed, .authenticationFailed, .unsupportedAuthentication, .tlsNotSupportedByServer, .timedOut, .protocolError, .server, .poolExhausted, .allConnectionsDown, .poolShutdown, .poolHasNoEndpoints, .columnIndexOutOfRange, .columnNameNotFound, .columnIsNull, .typeDecodingFailed, .parameterCountMismatch, .jsonEncodingFailed, .jsonDecodingFailed, .utf8DecodingFailed, .cancelled, .noCurrentClient:
             false
         }
     }
@@ -42,7 +55,7 @@ extension PostgresError {
         switch self {
         case .connectionClosed, .transportError, .timedOut:
             true
-        case .connectFailed, .poolExhausted, .server, .handshakeFailed, .authenticationFailed, .unsupportedAuthentication, .tlsNotSupportedByServer, .protocolError, .poolShutdown, .poolHasNoEndpoints, .columnIndexOutOfRange, .columnNameNotFound, .columnIsNull, .typeDecodingFailed, .parameterCountMismatch, .jsonEncodingFailed, .jsonDecodingFailed, .utf8DecodingFailed, .cancelled, .noCurrentClient:
+        case .connectFailed, .poolExhausted, .allConnectionsDown, .server, .handshakeFailed, .authenticationFailed, .unsupportedAuthentication, .tlsNotSupportedByServer, .protocolError, .poolShutdown, .poolHasNoEndpoints, .columnIndexOutOfRange, .columnNameNotFound, .columnIsNull, .typeDecodingFailed, .parameterCountMismatch, .jsonEncodingFailed, .jsonDecodingFailed, .utf8DecodingFailed, .cancelled, .noCurrentClient:
             false
         }
     }

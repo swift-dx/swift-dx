@@ -10,6 +10,7 @@
 //===----------------------------------------------------------------------===//
 
 import Foundation
+import Synchronization
 #if canImport(Glibc)
 import Glibc
 #elseif canImport(Darwin)
@@ -26,11 +27,15 @@ import Darwin
 // Foundation wrapper, so the wait/signal on each lease boundary is the bare POSIX
 // primitive with no class-instance or method-dispatch overhead.
 //
-// `@unchecked Sendable` is sound because the job queue is guarded by the mutex and
-// the connection is only ever touched by this owning thread.
+// `@unchecked Sendable` is sound because the job queue is guarded by the mutex,
+// and the connection reference is held in a Mutex box so the pool's reconnect
+// thread can swap in a fresh connection after the old one dies while the owning
+// thread is parked between leases. Each leased job reads the current connection
+// once at its start through that box; every query inside the lease then runs on
+// the captured reference with no further synchronization.
 final class LeaseWorker: @unchecked Sendable {
 
-    let connection: BlockingPostgresConnection
+    private let connectionBox: Mutex<BlockingPostgresConnection>
     private let mutex = UnsafeMutablePointer<pthread_mutex_t>.allocate(capacity: 1)
     private let jobAvailable = UnsafeMutablePointer<pthread_cond_t>.allocate(capacity: 1)
     private var pending: [@Sendable () -> Void] = []
@@ -38,11 +43,24 @@ final class LeaseWorker: @unchecked Sendable {
     private var stopped = false
 
     init(connection: BlockingPostgresConnection) {
-        self.connection = connection
+        self.connectionBox = Mutex(connection)
         pthread_mutex_init(mutex, nil)
         pthread_cond_init(jobAvailable, nil)
         pending.reserveCapacity(64)
         drain.reserveCapacity(64)
+    }
+
+    var currentConnection: BlockingPostgresConnection {
+        connectionBox.withLock { $0 }
+    }
+
+    func replaceConnection(_ connection: BlockingPostgresConnection) {
+        let previous = connectionBox.withLock { box -> BlockingPostgresConnection in
+            let previous = box
+            box = connection
+            return previous
+        }
+        previous.close()
     }
 
     func start() {
@@ -76,7 +94,7 @@ final class LeaseWorker: @unchecked Sendable {
             for job in drain { job() }
             drain.removeAll(keepingCapacity: true)
         }
-        connection.close()
+        currentConnection.close()
     }
 
     private func swapInJobs() -> Bool {

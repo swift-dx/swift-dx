@@ -9,6 +9,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+import Foundation
+import Logging
 import Synchronization
 
 /// A connection pool whose callers run synchronously in their own lane. A caller
@@ -19,31 +21,57 @@ import Synchronization
 /// connection is busy the caller suspends until one frees, so the async machinery
 /// is paid exactly when callers outnumber connections and never per query.
 ///
-/// `@unchecked Sendable` is sound because the free list and waiter queue are guarded
-/// by the lock-held state and each connection is only ever touched on its own thread.
+/// The pool heals itself. When a leased query fails because its connection broke,
+/// the worker is marked down and a background thread reconnects it forever with
+/// capped backoff, returning it to service the moment the server is reachable
+/// again. While a connection is down it is simply not leased; a caller that finds
+/// every connection down fails fast with ``PostgresError/allConnectionsDown`` rather
+/// than blocking, so a server outage surfaces as a prompt error, not a hang, while
+/// the pool keeps trying to recover behind it.
+///
+/// `@unchecked Sendable` is sound because the free list, waiter queue, and health
+/// counts are guarded by the lock-held state and each connection is only ever
+/// touched on its own thread.
 public final class PostgresLeasePool: @unchecked Sendable {
+
+    private static let initialBackoffSeconds = 0.05
+    private static let maxBackoffSeconds = 30.0
 
     private struct PoolState {
 
         var free: [Int]
         var waiters: [UnsafeContinuation<Int, Error>]
+        var healthyCount: Int
         var shuttingDown: Bool
     }
 
+    private enum ConnectionSource: Sendable {
+
+        case reconnectable(PostgresConnectionTarget)
+        case fixed
+    }
+
     private let workers: [LeaseWorker]
+    private let source: ConnectionSource
+    private let logger: Logger
     private let state: Mutex<PoolState>
 
     public convenience init(host: String, port: Int, username: String, password: String, database: String, applicationName: String, size: Int) throws(PostgresError) {
+        let target = PostgresConnectionTarget(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName)
         let count = max(1, size)
         var connections: [BlockingPostgresConnection] = []
         connections.reserveCapacity(count)
         for _ in 0..<count {
-            connections.append(try BlockingPostgresConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName))
+            connections.append(try target.connect())
         }
-        self.init(connections: connections)
+        self.init(connections: connections, source: .reconnectable(target))
     }
 
-    init(connections: [BlockingPostgresConnection]) {
+    convenience init(connections: [BlockingPostgresConnection]) {
+        self.init(connections: connections, source: .fixed)
+    }
+
+    private init(connections: [BlockingPostgresConnection], source: ConnectionSource) {
         var workers: [LeaseWorker] = []
         workers.reserveCapacity(connections.count)
         for connection in connections {
@@ -52,11 +80,17 @@ public final class PostgresLeasePool: @unchecked Sendable {
             workers.append(worker)
         }
         self.workers = workers
-        self.state = Mutex(PoolState(free: Array(0..<workers.count), waiters: [], shuttingDown: false))
+        self.source = source
+        self.logger = Logger(label: "dx.postgres.pool")
+        self.state = Mutex(PoolState(free: Array(0..<workers.count), waiters: [], healthyCount: workers.count, shuttingDown: false))
     }
 
     var waiterCount: Int {
         state.withLock { $0.waiters.count }
+    }
+
+    var healthyConnectionCount: Int {
+        state.withLock { $0.healthyCount }
     }
 
     public func transaction<Result: Sendable>(_ body: @escaping @Sendable (PostgresTransaction) throws -> Result) async throws -> Result {
@@ -92,7 +126,7 @@ public final class PostgresLeasePool: @unchecked Sendable {
             release(index)
             return result
         } catch {
-            release(index)
+            finishLease(index, error)
             throw error
         }
     }
@@ -141,7 +175,7 @@ public final class PostgresLeasePool: @unchecked Sendable {
         return try await withUnsafeThrowingContinuation { (continuation: UnsafeContinuation<Result, Error>) in
             let accepted = worker.submitJob {
                 do {
-                    continuation.resume(returning: try body(PostgresLeasedConnection(connection: worker.connection)))
+                    continuation.resume(returning: try body(PostgresLeasedConnection(connection: worker.currentConnection)))
                 } catch {
                     continuation.resume(throwing: error)
                 }
@@ -156,6 +190,7 @@ public final class PostgresLeasePool: @unchecked Sendable {
 
         case leased(Int)
         case parked
+        case allDown
         case shuttingDown
     }
 
@@ -177,6 +212,7 @@ public final class PostgresLeasePool: @unchecked Sendable {
     private func resumeOrPark(_ continuation: UnsafeContinuation<Int, Error>) {
         switch claimOrEnqueue(continuation) {
         case .leased(let index): continuation.resume(returning: index)
+        case .allDown: continuation.resume(throwing: PostgresError.allConnectionsDown)
         case .shuttingDown: continuation.resume(throwing: PostgresError.poolShutdown)
         case .parked: break
         }
@@ -186,6 +222,7 @@ public final class PostgresLeasePool: @unchecked Sendable {
         state.withLock {
             if $0.shuttingDown { return .shuttingDown }
             if let index = $0.free.popLast() { return .leased(index) }
+            if $0.healthyCount == 0 { return .allDown }
             $0.waiters.append(continuation)
             return .parked
         }
@@ -193,6 +230,58 @@ public final class PostgresLeasePool: @unchecked Sendable {
 
     private func release(_ index: Int) {
         let outcome: Release = state.withLock {
+            if $0.waiters.isEmpty {
+                $0.free.append(index)
+                return .returnedToFreeList
+            }
+            return .handoff($0.waiters.removeFirst())
+        }
+        if case .handoff(let waiter) = outcome { waiter.resume(returning: index) }
+    }
+
+    private func finishLease(_ index: Int, _ error: Error) {
+        guard PostgresError.translate(error).isConnectionFatal else {
+            release(index)
+            return
+        }
+        markDown(index)
+    }
+
+    private func markDown(_ index: Int) {
+        let stranded = state.withLock { state -> [UnsafeContinuation<Int, Error>] in
+            state.healthyCount -= 1
+            guard state.healthyCount == 0, !state.shuttingDown else { return [] }
+            let waiters = state.waiters
+            state.waiters = []
+            return waiters
+        }
+        for waiter in stranded { waiter.resume(throwing: PostgresError.allConnectionsDown) }
+        logger.warning("postgres connection lost; reconnecting in the background", metadata: ["slot": "\(index)"])
+        startReconnect(index)
+    }
+
+    private func startReconnect(_ index: Int) {
+        guard case .reconnectable(let target) = source else { return }
+        let thread = Thread { [weak self] in
+            var delaySeconds = Self.initialBackoffSeconds
+            while !(self?.state.withLock { $0.shuttingDown } ?? true) {
+                if let pool = self, let connection = try? target.connect() {
+                    pool.workers[index].replaceConnection(connection)
+                    pool.markRecovered(index)
+                    pool.logger.notice("postgres connection recovered", metadata: ["slot": "\(index)"])
+                    return
+                }
+                Thread.sleep(forTimeInterval: delaySeconds)
+                delaySeconds = min(delaySeconds * 2, Self.maxBackoffSeconds)
+            }
+        }
+        thread.stackSize = 1 << 20
+        thread.start()
+    }
+
+    private func markRecovered(_ index: Int) {
+        let outcome: Release = state.withLock {
+            $0.healthyCount += 1
             if $0.waiters.isEmpty {
                 $0.free.append(index)
                 return .returnedToFreeList
