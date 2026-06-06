@@ -130,6 +130,35 @@ coarse on the hardest formats and does not assert `idn-email`, `idn-hostname`,
 `iri`, `iri-reference`, or `uri-template` (they pass as annotations). Use the
 bytes path and your own check when you need RFC-exact validation of those.
 
+### Forbidding optional fields
+
+By default a schema may leave properties out of `required`, allow `null` in a
+`type`, and accept undeclared keys. To reject such schemas at compile time —
+so every loaded contract is fully explicit — pass `optionalFields: .forbidden`:
+
+```swift
+let schema = try JSONSchema.compile(schemaText, optionalFields: .forbidden)
+try registry.apply(envelopes, optionalFields: .forbidden)
+```
+
+Under `.forbidden`, compilation throws `JSONSchemaError` when, anywhere in the
+schema (including `$defs` and nested subschemas):
+
+- a declared property is missing from `required`
+  (`optionalPropertyForbidden`),
+- a `type` includes `"null"` (`nullableTypeForbidden`), or
+- an object schema stays open — it neither sets `additionalProperties` nor
+  `unevaluatedProperties` to `false`, or it uses `patternProperties` (which
+  admits undeclared keys) (`openObjectForbidden`).
+
+An object schema is any schema with `type: "object"` or an object keyword
+(`properties`, `patternProperties`, `additionalProperties`, `propertyNames`,
+`unevaluatedProperties`, `minProperties`, `maxProperties`, `required`,
+`dependentRequired`, `dependentSchemas`).
+
+Nothing is rewritten — a non-compliant schema is rejected, not repaired. The
+default remains `.allowed`, which preserves standard Draft 2020-12 behavior.
+
 ### References and remote documents
 
 Local references (`$ref` to `#`, `#/json/pointer`, `#anchor`, `$id`-relative)
@@ -234,7 +263,7 @@ millions of payloads; `String`/`UUID` also work.
 
 | Operation | Forms | Returns |
 |-----------|-------|---------|
-| `JSONSchema.compile` | `[UInt8]`, `String`, `ByteBuffer`; optional `formats:` and `resources:` | `JSONSchema` (throws `JSONSchemaError`) |
+| `JSONSchema.compile` | `[UInt8]`, `String`, `ByteBuffer`; optional `formats:`, `resources:`, `optionalFields:` | `JSONSchema` (throws `JSONSchemaError`) |
 | `JSONSchema.validate` | `[UInt8]`, `String`, `ByteBuffer`, `encoding: Encodable` | `SchemaValidationResult` |
 | `JSONSchema.validate(batch:)` | `Sequence` of `[UInt8]` | `[SchemaValidationResult]` |
 | `SchemaRegistry.apply` / `merge` | `[SchemaEnvelope]` | throws `JSONSchemaError` |

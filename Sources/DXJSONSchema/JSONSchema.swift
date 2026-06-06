@@ -20,34 +20,49 @@ public struct JSONSchema: Sendable {
     }
 
     public static func compile(_ schema: [UInt8]) throws(JSONSchemaError) -> JSONSchema {
-        try compile(schema, formats: .annotationOnly)
+        try compile(schema, formatAssertion: false, resources: [], optionalFields: .allowed)
     }
 
     public static func compile(_ schema: [UInt8], formats: FormatAssertionMode) throws(JSONSchemaError) -> JSONSchema {
-        let value = try parseSchema(schema)
-        return JSONSchema(document: try SchemaCompiler.compile(value, formatAssertion: formats == .assertion, resources: []))
+        try compile(schema, formatAssertion: formats == .assertion, resources: [], optionalFields: .allowed)
+    }
+
+    public static func compile(_ schema: [UInt8], optionalFields: OptionalFieldPolicy) throws(JSONSchemaError) -> JSONSchema {
+        try compile(schema, formatAssertion: false, resources: [], optionalFields: optionalFields)
     }
 
     public static func compile(_ schema: String) throws(JSONSchemaError) -> JSONSchema {
-        try compile(Array(schema.utf8), formats: .annotationOnly)
+        try compile(Array(schema.utf8))
     }
 
     public static func compile(_ schema: String, formats: FormatAssertionMode) throws(JSONSchemaError) -> JSONSchema {
         try compile(Array(schema.utf8), formats: formats)
     }
 
+    public static func compile(_ schema: String, optionalFields: OptionalFieldPolicy) throws(JSONSchemaError) -> JSONSchema {
+        try compile(Array(schema.utf8), optionalFields: optionalFields)
+    }
+
     public static func compile(_ schema: [UInt8], resources: [SchemaResource]) throws(JSONSchemaError) -> JSONSchema {
-        try compile(schema, formats: .annotationOnly, resources: resources)
+        try compile(schema, formatAssertion: false, resources: resources, optionalFields: .allowed)
     }
 
     public static func compile(_ schema: [UInt8], formats: FormatAssertionMode, resources: [SchemaResource]) throws(JSONSchemaError) -> JSONSchema {
-        let value = try parseSchema(schema)
-        let documents = try parseResources(resources)
-        return JSONSchema(document: try SchemaCompiler.compile(value, formatAssertion: formats == .assertion, resources: documents))
+        try compile(schema, formatAssertion: formats == .assertion, resources: resources, optionalFields: .allowed)
+    }
+
+    public static func compile(_ schema: [UInt8], resources: [SchemaResource], optionalFields: OptionalFieldPolicy) throws(JSONSchemaError) -> JSONSchema {
+        try compile(schema, formatAssertion: false, resources: resources, optionalFields: optionalFields)
     }
 
     public static func compile(_ schema: String, resources: [SchemaResource]) throws(JSONSchemaError) -> JSONSchema {
-        try compile(Array(schema.utf8), formats: .annotationOnly, resources: resources)
+        try compile(Array(schema.utf8), resources: resources)
+    }
+
+    private static func compile(_ schema: [UInt8], formatAssertion: Bool, resources: [SchemaResource], optionalFields: OptionalFieldPolicy) throws(JSONSchemaError) -> JSONSchema {
+        let value = try parseSchema(schema)
+        let documents = try parseResources(resources)
+        return JSONSchema(document: try SchemaCompiler.compile(value, formatAssertion: formatAssertion, resources: documents, optionalFields: optionalFields))
     }
 
     public func validate(_ instance: [UInt8]) -> SchemaValidationResult {

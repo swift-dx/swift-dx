@@ -23,6 +23,7 @@ struct SchemaCompiler {
     var referenceTargets: [Int] = []
     var rootIndex: Int = 0
     var formatAssertion: Bool = false
+    var optionalFields: OptionalFieldPolicy = .allowed
     var usesUnevaluated: Bool = false
     var usesDynamicScope: Bool = false
     var nodeAnchors: [Int: String] = [:]
@@ -31,9 +32,10 @@ struct SchemaCompiler {
     var idToLocation: [String: String] = ["": ""]
     var activeVocabularies: Set<SchemaVocabulary> = SchemaVocabulary.all
 
-    static func compile(_ schema: JSONValue, formatAssertion: Bool, resources: [ResourceDocument]) throws(JSONSchemaError) -> CompiledDocument {
+    static func compile(_ schema: JSONValue, formatAssertion: Bool, resources: [ResourceDocument], optionalFields: OptionalFieldPolicy) throws(JSONSchemaError) -> CompiledDocument {
         var compiler = SchemaCompiler()
         compiler.formatAssertion = formatAssertion
+        compiler.optionalFields = optionalFields
         compiler.activeVocabularies = try compiler.resolveActiveVocabularies(schema, resources)
         compiler.rootIndex = try compiler.compileSubschema(schema, at: "")
         compiler.activeVocabularies = SchemaVocabulary.all
@@ -78,6 +80,7 @@ struct SchemaCompiler {
     }
 
     mutating func compileObject(_ object: JSONObject, at location: String) throws(JSONSchemaError) -> Int {
+        try enforceOptionalFieldPolicy(object, at: location)
         let index = reserveNode(at: location)
         let savedBase = currentBase
         let savedResourceNode = currentResourceNode

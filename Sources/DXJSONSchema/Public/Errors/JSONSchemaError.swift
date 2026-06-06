@@ -20,6 +20,9 @@ public enum JSONSchemaError: Error, Sendable, Equatable {
     case invalidSchemaType
     case invalidSchemaStructure(type: String)
     case unknownRequiredVocabulary(uri: String)
+    case optionalPropertyForbidden(keywordLocation: String, property: String)
+    case nullableTypeForbidden(keywordLocation: String)
+    case openObjectForbidden(keywordLocation: String)
 }
 
 extension JSONSchemaError: CustomStringConvertible {
@@ -35,6 +38,9 @@ extension JSONSchemaError: CustomStringConvertible {
         case .invalidSchemaType: "schema type must be a non-empty string"
         case .invalidSchemaStructure(let type): "schema for type '\(type)' is not a valid Draft 2020-12 schema"
         case .unknownRequiredVocabulary(let uri): "meta-schema requires unknown vocabulary '\(uri)'"
+        case .optionalPropertyForbidden(let location, let property): "property '\(property)' at '\(location)' must be listed in 'required'; the strict optional-field policy forbids optional properties"
+        case .nullableTypeForbidden(let location): "type at '\(location)' must not include 'null'; the strict optional-field policy forbids nullable types"
+        case .openObjectForbidden(let location): "object at '\(location)' admits undeclared keys; the strict optional-field policy requires 'additionalProperties' or 'unevaluatedProperties' to be false and forbids 'patternProperties'"
         }
     }
 }
