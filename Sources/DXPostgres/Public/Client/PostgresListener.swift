@@ -9,6 +9,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+import DXCore
 import Foundation
 
 /// A live `LISTEN`/`NOTIFY` subscription. It owns one dedicated connection driven
@@ -86,7 +87,7 @@ extension Postgres {
     /// Subscribes to `channels` and returns a listener whose
     /// ``PostgresListener/notifications`` stream yields each notification the
     /// server publishes on them. To follow a table's changes, use
-    /// ``watchTable(_:table:channel:)`` instead, which installs the publishing
+    /// ``watchTable(_:table:)`` instead, which installs the publishing
     /// trigger and subscribes for you.
     public static func subscribe(host: String, port: Int, username: String, password: String, database: String, applicationName: String, channels: [String]) throws(PostgresError) -> PostgresListener {
         let target = PostgresConnectionTarget(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName)
@@ -100,35 +101,47 @@ extension Postgres {
         try subscribe(host: configuration.host, port: configuration.port, username: configuration.username, password: configuration.password, database: configuration.database, applicationName: configuration.applicationName, channels: channels)
     }
 
-    /// Watches `table` using a shared ``PostgresConfiguration``.
-    public static func watchTable(_ configuration: PostgresConfiguration, table: String, channel: String) throws(PostgresError) -> PostgresListener {
-        try watchTable(host: configuration.host, port: configuration.port, username: configuration.username, password: configuration.password, database: configuration.database, applicationName: configuration.applicationName, table: table, channel: channel)
+    /// Watches `table` using a shared ``PostgresConfiguration``. The publish channel
+    /// is derived from the table name.
+    public static func watchTable(_ configuration: PostgresConfiguration, table: String) throws(PostgresError) -> PostgresListener {
+        try watchTable(host: configuration.host, port: configuration.port, username: configuration.username, password: configuration.password, database: configuration.database, applicationName: configuration.applicationName, table: table)
     }
 
     /// Watches `table` for rows matching `filter`, using a shared ``PostgresConfiguration``.
-    public static func watchTable(_ configuration: PostgresConfiguration, table: String, channel: String, where filter: String) throws(PostgresError) -> PostgresListener {
-        try watchTable(host: configuration.host, port: configuration.port, username: configuration.username, password: configuration.password, database: configuration.database, applicationName: configuration.applicationName, table: table, channel: channel, where: filter)
+    public static func watchTable(_ configuration: PostgresConfiguration, table: String, where filter: String) throws(PostgresError) -> PostgresListener {
+        try watchTable(host: configuration.host, port: configuration.port, username: configuration.username, password: configuration.password, database: configuration.database, applicationName: configuration.applicationName, table: table, where: filter)
     }
 
     /// Installs an AFTER INSERT/UPDATE/DELETE trigger on `table` that publishes each
-    /// changed row as JSON (`{"op":…, "row":…}`) on `channel`, then returns a
-    /// listener subscribed to that channel. Fires for every changed row.
-    public static func watchTable(host: String, port: Int, username: String, password: String, database: String, applicationName: String, table: String, channel: String) throws(PostgresError) -> PostgresListener {
-        try installChangeTrigger(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName, table: table, channel: channel, events: "INSERT OR UPDATE OR DELETE", whenClause: "")
+    /// changed row as JSON (`{"op":…, "row":…}`) on a channel derived from the table,
+    /// then returns a listener subscribed to that channel. Fires for every changed row.
+    public static func watchTable(host: String, port: Int, username: String, password: String, database: String, applicationName: String, table: String) throws(PostgresError) -> PostgresListener {
+        let target = PostgresConnectionTarget(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName)
+        return try watchTable(target: target, table: table)
     }
 
-    /// As ``watchTable(host:port:username:password:database:applicationName:table:channel:)``
+    /// As ``watchTable(host:port:username:password:database:applicationName:table:)``
     /// but the trigger fires only for rows matching `filter`, a SQL boolean over the
     /// new row, for example `NEW.status = 'active'`. The filter runs in the server,
     /// so the client receives only matching changes.
-    public static func watchTable(host: String, port: Int, username: String, password: String, database: String, applicationName: String, table: String, channel: String, where filter: String) throws(PostgresError) -> PostgresListener {
-        try installChangeTrigger(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName, table: table, channel: channel, events: "INSERT OR UPDATE", whenClause: "WHEN (\(filter)) ")
+    public static func watchTable(host: String, port: Int, username: String, password: String, database: String, applicationName: String, table: String, where filter: String) throws(PostgresError) -> PostgresListener {
+        let target = PostgresConnectionTarget(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName)
+        return try watchTable(target: target, table: table, where: filter)
     }
 
-    private static func installChangeTrigger(host: String, port: Int, username: String, password: String, database: String, applicationName: String, table: String, channel: String, events: String, whenClause: String) throws(PostgresError) -> PostgresListener {
+    static func watchTable(target: PostgresConnectionTarget, table: String) throws(PostgresError) -> PostgresListener {
+        try installChangeTrigger(target: target, table: table, events: "INSERT OR UPDATE OR DELETE", whenClause: "")
+    }
+
+    static func watchTable(target: PostgresConnectionTarget, table: String, where filter: String) throws(PostgresError) -> PostgresListener {
+        try installChangeTrigger(target: target, table: table, events: "INSERT OR UPDATE", whenClause: "WHEN (\(filter)) ")
+    }
+
+    private static func installChangeTrigger(target: PostgresConnectionTarget, table: String, events: String, whenClause: String) throws(PostgresError) -> PostgresListener {
+        let channel = changeChannelName(forTable: table)
         let function = "dx_notify_\(channel)"
         let trigger = "dx_trg_\(channel)"
-        let setup = try BlockingPostgresConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName)
+        let setup = try target.connect()
         _ = try setup.execute("""
         CREATE OR REPLACE FUNCTION \(function)() RETURNS trigger LANGUAGE plpgsql AS $dx$
         BEGIN
@@ -140,7 +153,12 @@ extension Postgres {
         _ = try setup.execute("DROP TRIGGER IF EXISTS \(trigger) ON \(table)")
         _ = try setup.execute("CREATE TRIGGER \(trigger) AFTER \(events) ON \(table) FOR EACH ROW \(whenClause)EXECUTE FUNCTION \(function)()")
         setup.close()
-        let target = PostgresConnectionTarget(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName)
         return try PostgresListener(target: target, channels: [channel])
+    }
+
+    private static func changeChannelName(forTable table: String) -> String {
+        let identifier = String(table.map { $0.isLetter || $0.isNumber ? $0 : "_" }.prefix(30))
+        let checksum = String(Crc16.ccittXmodem(Array(table.utf8)), radix: 16)
+        return "dx_watch_\(identifier)_\(checksum)"
     }
 }

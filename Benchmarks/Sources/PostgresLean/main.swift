@@ -188,7 +188,7 @@ private func runWatchDemo() async throws {
     _ = try admin.execute("CREATE TABLE dx_watch_test (id int, amount int)")
     admin.close()
     // Watch only rows whose amount > 100 — the filter runs server-side in the trigger.
-    let listener = try Postgres.watchTable(host: host, port: port, username: username, password: password, database: database, applicationName: "dxwatch", table: "dx_watch_test", channel: "dx_watch", where: "NEW.amount > 100")
+    let listener = try Postgres.watchTable(host: host, port: port, username: username, password: password, database: database, applicationName: "dxwatch", table: "dx_watch_test", where: "NEW.amount > 100")
     let writer = try PostgresDirectConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: "dxwriter")
     _ = try writer.execute("INSERT INTO dx_watch_test VALUES (1, 50)")              // filtered out
     _ = try writer.execute("INSERT INTO dx_watch_test VALUES (2, 200)")             // matches

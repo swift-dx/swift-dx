@@ -217,33 +217,41 @@ dedicated connection:
 try await Postgres.notify(channel: "cache_invalidation", payload: "user:42")
 ```
 
-Subscribe to one or more channels. The returned listener owns a single dedicated
-connection that can carry many channels at once:
+Subscribe to one or more channels. With the ambient client bound, a subscription
+needs no configuration of its own — it reuses the bound client's settings. The
+returned listener owns a single dedicated connection that can carry many channels
+at once, and `listen` / `unlisten` add or drop channels on the live subscription:
 
 ```swift
 // Subscribe to raw channels (published by your own notify / pg_notify, another
-// service, or a trigger) — reuse the same configuration you built for the pool:
-let subscription = try Postgres.subscribe(configuration, channels: ["cache_invalidation"])
+// service, or a trigger):
+let subscription = try Postgres.subscribe(channels: ["cache_invalidation"])
 for try await note in subscription.notifications {
     handle(note.payload)
 }
 ```
 
 `watchTable` is the same subscribe machinery with the publish side filled in for
-you: it installs a row-change trigger that publishes each change, then subscribes.
-The `WHEN` filter runs in the server, so only matching changes reach you, each as
-JSON `{"op":"UPDATE","row":{…}}`:
+you: it installs a row-change trigger that publishes each change on a channel
+derived from the table name, then subscribes. The `where` filter runs in the
+server, so only matching changes reach you, each as JSON `{"op":"UPDATE","row":{…}}`:
 
 ```swift
-let watch = try Postgres.watchTable(configuration, table: "orders", channel: "order_changes", where: "NEW.status = 'paid'")
+let watch = try Postgres.watchTable(table: "orders", where: "NEW.status = 'paid'")
 for try await change in watch.notifications {
     handle(change.payload)
 }
 ```
 
+Both also take an explicit `PostgresConfiguration` (`Postgres.subscribe(configuration,
+channels:)`, `Postgres.watchTable(configuration, table:)`) for use outside a bound
+task tree.
+
 Each notification the subscription yields is delivered to the async stream;
 ending the stream tears the subscription down. The subscription manages its own
-connection.
+connection and heals itself: if the connection drops it reconnects in the
+background forever with capped backoff and re-issues every active channel before
+resuming.
 
 Delivery is ephemeral and at-most-once: a notification reaches only the sessions
 listening when it is sent, is not stored, and is not replayed — a subscriber that

@@ -80,4 +80,30 @@ extension Postgres {
     public static func transaction<Result: Sendable>(_ body: @escaping @Sendable (PostgresTransaction) throws -> Result) async throws -> Result {
         try await current().transaction(body)
     }
+
+    /// Subscribes to `channels` using the ambient client's connection settings, so a
+    /// subscription needs no configuration of its own. The returned listener owns a
+    /// dedicated, self-healing connection separate from the pool.
+    public static func subscribe(channels: [String]) throws(PostgresError) -> PostgresListener {
+        try PostgresListener(target: subscriptionTarget(), channels: channels)
+    }
+
+    /// Watches `table` through the ambient client, installing the change trigger and
+    /// subscribing for you. The publish channel is derived from the table name.
+    public static func watchTable(table: String) throws(PostgresError) -> PostgresListener {
+        try watchTable(target: subscriptionTarget(), table: table)
+    }
+
+    /// Watches `table` for rows matching `filter` through the ambient client. The
+    /// filter runs in the server, so only matching changes reach the listener.
+    public static func watchTable(table: String, where filter: String) throws(PostgresError) -> PostgresListener {
+        try watchTable(target: subscriptionTarget(), table: table, where: filter)
+    }
+
+    private static func subscriptionTarget() throws(PostgresError) -> PostgresConnectionTarget {
+        guard let provider = try current() as? PostgresSubscriptionProvider, case .reconnectable(let target) = provider.listenerSource else {
+            throw PostgresError.noCurrentClient
+        }
+        return target
+    }
 }

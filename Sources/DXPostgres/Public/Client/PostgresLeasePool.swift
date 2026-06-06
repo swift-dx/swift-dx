@@ -293,3 +293,13 @@ public final class PostgresLeasePool: @unchecked Sendable {
 }
 
 extension PostgresLeasePool: PostgresClient {}
+
+extension PostgresLeasePool: PostgresSubscriptionProvider {
+
+    var listenerSource: ListenerSource {
+        switch source {
+        case .reconnectable(let target): .reconnectable(target)
+        case .fixed: .fixed
+        }
+    }
+}
