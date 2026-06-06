@@ -226,27 +226,61 @@ final class BlockingPostgresConnection: @unchecked Sendable {
         return PostgresResult(columns: columns, rows: rows)
     }
 
-    func listen(_ channel: String) throws(PostgresError) {
-        writeScratch.clear()
-        FrontendMessage.appendQuery(into: &writeScratch, sql: "LISTEN \"\(channel)\"")
-        try writeAll(writeScratch)
-        while true {
-            switch try nextMessage() {
-            case .readyForQuery:
-                return
-            case .error(let serverError):
-                try consumeUntilReadyForQuery()
-                throw PostgresError.server(serverError)
-            default:
-                continue
-            }
-        }
+    var fileDescriptor: Int32 {
+        descriptor
     }
 
-    func awaitNotification() throws(PostgresError) -> PostgresNotification {
+    func listen(_ channel: String, onNotification: (PostgresNotification) -> Void) throws(PostgresError) {
+        try issueChannelCommand("LISTEN \"\(channel)\"", onNotification: onNotification)
+    }
+
+    func unlisten(_ channel: String, onNotification: (PostgresNotification) -> Void) throws(PostgresError) {
+        try issueChannelCommand("UNLISTEN \"\(channel)\"", onNotification: onNotification)
+    }
+
+    private func issueChannelCommand(_ sql: String, onNotification: (PostgresNotification) -> Void) throws(PostgresError) {
+        writeScratch.clear()
+        FrontendMessage.appendQuery(into: &writeScratch, sql: sql)
+        try writeAll(writeScratch)
+        while try !readyForQueryReached(onNotification: onNotification) {}
+    }
+
+    private func readyForQueryReached(onNotification: (PostgresNotification) -> Void) throws(PostgresError) -> Bool {
+        let message = try nextMessage()
+        if case .readyForQuery = message { return true }
+        if case .error(let serverError) = message {
+            try consumeUntilReadyForQuery()
+            throw PostgresError.server(serverError)
+        }
+        if case .notification(let processID, let channel, let payload) = message {
+            onNotification(PostgresNotification(processID: processID, channel: channel, payload: payload))
+        }
+        return false
+    }
+
+    func waitForReadableOrInterrupt(interruptDescriptor: Int32) -> ListenerWakeup {
+        var descriptors = [
+            pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0),
+            pollfd(fd: interruptDescriptor, events: Int16(POLLIN), revents: 0),
+        ]
+        let result = poll(&descriptors, 2, -1)
+        if descriptors[1].revents != 0 { return .interrupt }
+        if descriptors[0].revents != 0 { return .readable }
+        if result < 0 && errno != EINTR { return .readable }
+        return .interrupt
+    }
+
+    func nextBufferedNotification() throws(PostgresError) -> BufferedNotification {
         while true {
-            if case .notification(let processID, let channel, let payload) = try nextMessage() {
-                return PostgresNotification(processID: processID, channel: channel, payload: payload)
+            switch try BackendMessageDecoder.decodeOne(from: readBuffer) {
+            case .needMore:
+                return .needMore
+            case .message(let message, let consumed):
+                readBuffer.moveReaderIndex(forwardBy: consumed)
+                reclaimReadBuffer()
+                if case .notification(let processID, let channel, let payload) = message {
+                    return .notification(PostgresNotification(processID: processID, channel: channel, payload: payload))
+                }
             }
         }
     }
@@ -257,7 +291,7 @@ final class BlockingPostgresConnection: @unchecked Sendable {
         }
     }
 
-    private func fillReadBuffer() throws(PostgresError) {
+    func fillReadBuffer() throws(PostgresError) {
         var received = 0
         readBuffer.writeWithUnsafeMutableBytes(minimumWritableBytes: Self.receiveChunkBytes) { raw in
             received = recv(descriptor, raw.baseAddress, raw.count, 0)
