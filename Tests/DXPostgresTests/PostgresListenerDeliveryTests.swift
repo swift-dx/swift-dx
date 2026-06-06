@@ -38,6 +38,45 @@ import Glibc
     }
 
     @Test(.timeLimit(.minutes(1)))
+    func aFixedConnectionDropFinishesTheStreamWithAnError() async throws {
+        var descriptors: [Int32] = [0, 0]
+        #expect(socketpair(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0, &descriptors) == 0)
+
+        readyForQuery.withUnsafeBytes { _ = write(descriptors[1], $0.baseAddress, $0.count) }
+
+        let connection = BlockingPostgresConnection(descriptor: descriptors[0])
+        let listener = try PostgresListener(connection: connection, channels: ["ch"])
+
+        close(descriptors[1])
+
+        var caught = false
+        do {
+            for try await _ in listener.notifications {}
+        } catch {
+            caught = true
+        }
+        #expect(caught)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func aReconnectableSubscriptionStandsByAndClosesAfterItsConnectionDrops() async throws {
+        var descriptors: [Int32] = [0, 0]
+        #expect(socketpair(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0, &descriptors) == 0)
+
+        readyForQuery.withUnsafeBytes { _ = write(descriptors[1], $0.baseAddress, $0.count) }
+
+        let connection = BlockingPostgresConnection(descriptor: descriptors[0])
+        let target = PostgresConnectionTarget(host: "127.0.0.1", port: 1, username: "x", password: "", database: "x", applicationName: "dx-test")
+        let listener = try PostgresListener(connection: connection, source: .reconnectable(target), channels: ["ch"])
+
+        close(descriptors[1])
+        try await Task.sleep(nanoseconds: 200_000_000)
+        listener.close()
+
+        for try await _ in listener.notifications {}
+    }
+
+    @Test(.timeLimit(.minutes(1)))
     func closeFinishesTheStreamWithoutError() async throws {
         var descriptors: [Int32] = [0, 0]
         #expect(socketpair(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0, &descriptors) == 0)

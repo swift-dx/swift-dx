@@ -43,3 +43,23 @@ enum ListenerStep: Sendable {
     case keepGoing
     case terminated(ListenerLoopOutcome)
 }
+
+// How a subscription obtains and re-obtains its connection: a fixed connection that
+// cannot be rebuilt (used by hermetic tests), or a target the loop reconnects to
+// forever after a drop.
+enum ListenerSource: Sendable {
+
+    case fixed
+    case reconnectable(PostgresConnectionTarget)
+}
+
+// The decision after a subscription's connection fails: a fresh connection was
+// established (and stored as the current connection) so the loop resumes, a stop
+// was requested so it finishes cleanly, or the source cannot reconnect so the
+// failure ends the stream.
+enum ListenerRecovery: Sendable {
+
+    case reconnected
+    case stop
+    case fail(PostgresError)
+}

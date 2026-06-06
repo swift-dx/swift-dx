@@ -88,6 +88,20 @@ final class ListenerControl: @unchecked Sendable {
         }
     }
 
+    func waitForSignal(timeoutSeconds: Double) {
+        var descriptor = pollfd(fd: readDescriptor, events: Int16(POLLIN), revents: 0)
+        _ = poll(&descriptor, 1, Int32(timeoutSeconds * 1000))
+        clearSignal()
+    }
+
+    func resignalIfPending() {
+        state.withLock { state in
+            guard !state.closed, !state.pending.isEmpty else { return }
+            var signal: UInt8 = 1
+            _ = write(writeDescriptor, &signal, 1)
+        }
+    }
+
     func close() {
         state.withLock { state in
             guard !state.closed else { return }
@@ -99,6 +113,14 @@ final class ListenerControl: @unchecked Sendable {
 
     deinit {
         close()
+    }
+
+    private func clearSignal() {
+        state.withLock { state in
+            guard !state.closed else { return }
+            var scratch = [UInt8](repeating: 0, count: 64)
+            while scratch.withUnsafeMutableBytes({ read(readDescriptor, $0.baseAddress, $0.count) }) > 0 {}
+        }
     }
 
     private static func makeNonBlocking(_ descriptor: Int32) {

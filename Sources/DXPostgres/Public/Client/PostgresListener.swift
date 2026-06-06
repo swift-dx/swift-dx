@@ -19,6 +19,11 @@ import Foundation
 /// otherwise parked. Ending the iteration, calling ``close()``, or dropping the
 /// listener stops the loop and closes the connection.
 ///
+/// A subscription opened from a configuration heals itself: if its connection
+/// drops, it reconnects in the background forever with capped backoff and re-issues
+/// every active channel before resuming, so a server outage suspends delivery
+/// rather than ending the subscription.
+///
 /// The stream buffers a bounded number of notifications. A consumer that falls
 /// behind does not stall the server or grow memory without limit: once the buffer
 /// is full the oldest pending notifications are dropped, matching the at-most-once
@@ -27,24 +32,29 @@ public final class PostgresListener: @unchecked Sendable {
 
     private static let notificationBufferCapacity = 1024
 
-    private let connection: BlockingPostgresConnection
-    private let control: ListenerControl
+    private let loop: SubscriptionReceiveLoop
     public let notifications: AsyncThrowingStream<PostgresNotification, Error>
 
-    init(connection: BlockingPostgresConnection, channels: [String]) throws(PostgresError) {
-        self.connection = connection
-        self.control = try ListenerControl()
+    convenience init(connection: BlockingPostgresConnection, channels: [String]) throws(PostgresError) {
+        try self.init(connection: connection, source: .fixed, channels: channels)
+    }
+
+    convenience init(target: PostgresConnectionTarget, channels: [String]) throws(PostgresError) {
+        let connection = try target.connect()
+        try self.init(connection: connection, source: .reconnectable(target), channels: channels)
+    }
+
+    init(connection: BlockingPostgresConnection, source: ListenerSource, channels: [String]) throws(PostgresError) {
+        let control = try ListenerControl()
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: PostgresNotification.self, throwing: Error.self, bufferingPolicy: .bufferingNewest(Self.notificationBufferCapacity))
-        self.notifications = stream
         for channel in channels {
             try connection.listen(channel) { continuation.yield($0) }
         }
-        let control = self.control
-        continuation.onTermination = { [connection, control] _ in
-            control.requestStop()
-            connection.close()
-        }
-        let thread = Thread { Self.runLoop(connection: connection, control: control, continuation: continuation) }
+        let loop = SubscriptionReceiveLoop(connection: connection, source: source, control: control, continuation: continuation, channels: Set(channels))
+        self.loop = loop
+        self.notifications = stream
+        continuation.onTermination = { [weak loop] _ in loop?.requestStop() }
+        let thread = Thread { loop.run() }
         thread.stackSize = 1 << 20
         thread.start()
     }
@@ -52,93 +62,22 @@ public final class PostgresListener: @unchecked Sendable {
     /// Adds `channel` to this subscription on its existing connection. Notifications
     /// on it begin flowing to ``notifications`` once the server acknowledges.
     public func listen(_ channel: String) {
-        control.enqueue(.listen(channel))
+        loop.listen(channel)
     }
 
     /// Stops delivering notifications for `channel` without affecting the others.
     public func unlisten(_ channel: String) {
-        control.enqueue(.unlisten(channel))
+        loop.unlisten(channel)
     }
 
     /// Stops the receive loop and closes the connection. Idempotent. Wakes the loop
     /// immediately even if it is parked in a blocking read.
     public func close() {
-        control.requestStop()
-        connection.close()
+        loop.requestStop()
     }
 
     deinit {
-        control.requestStop()
-        connection.close()
-    }
-
-    private static func runLoop(connection: BlockingPostgresConnection, control: ListenerControl, continuation: AsyncThrowingStream<PostgresNotification, Error>.Continuation) {
-        let outcome = drive(connection: connection, control: control, continuation: continuation)
-        connection.close()
-        control.close()
-        switch outcome {
-        case .stopped: continuation.finish()
-        case .failed(let error): continuation.finish(throwing: error)
-        }
-    }
-
-    private static func drive(connection: BlockingPostgresConnection, control: ListenerControl, continuation: AsyncThrowingStream<PostgresNotification, Error>.Continuation) -> ListenerLoopOutcome {
-        while true {
-            if case .terminated(let outcome) = step(connection: connection, control: control, continuation: continuation) {
-                return outcome
-            }
-        }
-    }
-
-    private static func step(connection: BlockingPostgresConnection, control: ListenerControl, continuation: AsyncThrowingStream<PostgresNotification, Error>.Continuation) -> ListenerStep {
-        do {
-            try drainBuffered(connection: connection, continuation: continuation)
-            return try pumpRequestsStop(connection: connection, control: control, continuation: continuation) ? .terminated(.stopped) : .keepGoing
-        } catch {
-            return .terminated(terminalOutcome(control: control, error: error))
-        }
-    }
-
-    private static func terminalOutcome(control: ListenerControl, error: PostgresError) -> ListenerLoopOutcome {
-        control.isStopRequested ? .stopped : .failed(error)
-    }
-
-    private static func drainBuffered(connection: BlockingPostgresConnection, continuation: AsyncThrowingStream<PostgresNotification, Error>.Continuation) throws(PostgresError) {
-        while case .notification(let notification) = try connection.nextBufferedNotification() {
-            continuation.yield(notification)
-        }
-    }
-
-    private static func pumpRequestsStop(connection: BlockingPostgresConnection, control: ListenerControl, continuation: AsyncThrowingStream<PostgresNotification, Error>.Continuation) throws(PostgresError) -> Bool {
-        switch connection.waitForReadableOrInterrupt(interruptDescriptor: control.readDescriptor) {
-        case .readable:
-            try connection.fillReadBuffer()
-            return false
-        case .interrupt:
-            return try applyCommandsRequestStop(connection: connection, control: control, continuation: continuation)
-        }
-    }
-
-    private static func applyCommandsRequestStop(connection: BlockingPostgresConnection, control: ListenerControl, continuation: AsyncThrowingStream<PostgresNotification, Error>.Continuation) throws(PostgresError) -> Bool {
-        for command in control.drainCommands() {
-            if try apply(command: command, connection: connection, continuation: continuation) {
-                return true
-            }
-        }
-        return false
-    }
-
-    private static func apply(command: ListenerCommand, connection: BlockingPostgresConnection, continuation: AsyncThrowingStream<PostgresNotification, Error>.Continuation) throws(PostgresError) -> Bool {
-        switch command {
-        case .stop:
-            return true
-        case .listen(let channel):
-            try connection.listen(channel) { continuation.yield($0) }
-            return false
-        case .unlisten(let channel):
-            try connection.unlisten(channel) { continuation.yield($0) }
-            return false
-        }
+        loop.requestStop()
     }
 }
 
@@ -150,8 +89,8 @@ extension Postgres {
     /// ``watchTable(_:table:channel:)`` instead, which installs the publishing
     /// trigger and subscribes for you.
     public static func subscribe(host: String, port: Int, username: String, password: String, database: String, applicationName: String, channels: [String]) throws(PostgresError) -> PostgresListener {
-        let connection = try BlockingPostgresConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName)
-        return try PostgresListener(connection: connection, channels: channels)
+        let target = PostgresConnectionTarget(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName)
+        return try PostgresListener(target: target, channels: channels)
     }
 
     /// Subscribes to `channels` using the same ``PostgresConfiguration`` as a
@@ -201,7 +140,7 @@ extension Postgres {
         _ = try setup.execute("DROP TRIGGER IF EXISTS \(trigger) ON \(table)")
         _ = try setup.execute("CREATE TRIGGER \(trigger) AFTER \(events) ON \(table) FOR EACH ROW \(whenClause)EXECUTE FUNCTION \(function)()")
         setup.close()
-        let connection = try BlockingPostgresConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName)
-        return try PostgresListener(connection: connection, channels: [channel])
+        let target = PostgresConnectionTarget(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName)
+        return try PostgresListener(target: target, channels: [channel])
     }
 }
