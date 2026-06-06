@@ -109,8 +109,9 @@ planned). It runs ad-hoc and parameterized statements — interpolated
 values are bound, never spliced into the SQL — decodes rows into
 `Decodable` types, and groups work into connection-free
 `transaction { tx in … }` blocks that commit on return and roll back on a
-throw. `LISTEN`/`NOTIFY` is exposed as `subscribe`, with a `watchTable`
-helper that publishes row changes through a server-side trigger. Configure
+throw. `LISTEN`/`NOTIFY` is exposed as `notify` to publish and `subscribe` to
+receive, with a `watchTable` helper that publishes row changes through a
+server-side trigger. Configure
 once, run it as a ServiceLifecycle `Service`, and reach it from anywhere
 through the ambient `Postgres.execute` / `query` / `transaction` — no
 instance threaded through the application. SQL NULL is a named value, never

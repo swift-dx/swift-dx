@@ -16,8 +16,9 @@ while callers keep a plain `async` API.
   decodes rows straight into your `Decodable` types.
 - **Group work into transactions** with `transaction { tx in … }`: commit on
   return, roll back on a thrown error — with no connection to manage.
-- **Subscribe** to `NOTIFY` channels, including a `watchTable` helper that
-  installs a change-capture trigger with an optional server-side filter.
+- **Publish and subscribe** over `NOTIFY` channels — `notify` to send, `subscribe`
+  to receive — including a `watchTable` helper that installs a change-capture
+  trigger with an optional server-side filter.
 
 ## Install
 
@@ -94,6 +95,23 @@ type stays hidden, and `Postgres.current()` throws
 prefer an explicit handle — for code outside the bound task tree, such as a
 `Task.detached` — keep the returned value and call `postgres.execute` /
 `postgres.query` / `postgres.transaction` on it directly.
+
+## Resilience
+
+The pool heals itself, so a server outage does not take the process down with it.
+When a statement fails because its connection broke, that connection is marked
+down and a background task reconnects it — forever, with capped exponential
+backoff — returning it to service the moment the server is reachable again. A
+connection lost is logged once at `warning`, a connection recovered once at
+`notice`, through swift-log; there is no per-attempt log spam while a server is
+offline.
+
+While a connection is down it is simply not handed out. Calls keep using the
+healthy connections. If every connection is down, a call does not block for a
+timeout — it fails fast with `PostgresError.allConnectionsDown`, which is
+transient, so retrying once the server returns succeeds. The reconnection never
+gives up, so a database that is offline for a day and then returns needs no
+restart or intervention on the client side.
 
 ## Running queries
 
@@ -187,16 +205,36 @@ call on the instance: `client.transaction { tx in … }`.
 
 ## Subscriptions
 
+A channel is a named, shared mailbox. Something **publishes** a payload on it with
+`NOTIFY` / `pg_notify`, and every session **subscribed** to that channel at that
+moment receives it. The two ends are independent: publish and subscribe each name
+the same channel string and otherwise know nothing about each other.
+
+Publish from the pooled client — it is an ordinary statement, so it needs no
+dedicated connection:
+
 ```swift
-// Subscribe to raw channels (your own NOTIFY / pg_notify) — reuse the same
-// configuration you built for the pool:
+try await Postgres.notify(channel: "cache_invalidation", payload: "user:42")
+```
+
+Subscribe to one or more channels. The returned listener owns a single dedicated
+connection that can carry many channels at once:
+
+```swift
+// Subscribe to raw channels (published by your own notify / pg_notify, another
+// service, or a trigger) — reuse the same configuration you built for the pool:
 let subscription = try Postgres.subscribe(configuration, channels: ["cache_invalidation"])
 for try await note in subscription.notifications {
     handle(note.payload)
 }
+```
 
-// Watch a table; the WHEN filter runs in the server, so only matching changes
-// reach you, each as JSON: {"op":"UPDATE","row":{…}}.
+`watchTable` is the same subscribe machinery with the publish side filled in for
+you: it installs a row-change trigger that publishes each change, then subscribes.
+The `WHEN` filter runs in the server, so only matching changes reach you, each as
+JSON `{"op":"UPDATE","row":{…}}`:
+
+```swift
 let watch = try Postgres.watchTable(configuration, table: "orders", channel: "order_changes", where: "NEW.status = 'paid'")
 for try await change in watch.notifications {
     handle(change.payload)
@@ -206,6 +244,14 @@ for try await change in watch.notifications {
 Each notification the subscription yields is delivered to the async stream;
 ending the stream tears the subscription down. The subscription manages its own
 connection.
+
+Delivery is ephemeral and at-most-once: a notification reaches only the sessions
+listening when it is sent, is not stored, and is not replayed — a subscriber that
+is disconnected or reconnecting at that instant misses it. For durable, replayable
+delivery, use a table-as-queue or a dedicated broker rather than `NOTIFY`. Channel
+names are exact strings, with no wildcard or pattern matching; to route by topic,
+publish to a fixed set of channels or carry the topic in the payload and filter on
+receipt.
 
 ## Status
 
@@ -221,9 +267,10 @@ This is the lean, high-performance core. Current scope:
 ## Dependencies
 
 `DXCore`, swift-nio (`NIOCore`, for `ByteBuffer`), swift-crypto (`Crypto`, for
-SCRAM/MD5), and swift-service-lifecycle (`ServiceLifecycle`, for running the pool
-as a managed `Service`). No event loop, no atomics package, no TLS stack on the
-query path.
+SCRAM/MD5), swift-log (`Logging`, for connection-lifecycle events such as a lost
+or recovered connection), and swift-service-lifecycle (`ServiceLifecycle`, for
+running the pool as a managed `Service`). No event loop, no atomics package, no
+TLS stack on the query path.
 
 ## Performance
 
