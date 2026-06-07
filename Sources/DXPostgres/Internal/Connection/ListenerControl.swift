@@ -106,8 +106,13 @@ final class ListenerControl: @unchecked Sendable {
         state.withLock { state in
             guard !state.closed else { return }
             state.closed = true
+            #if canImport(Darwin)
+            _ = Darwin.close(writeDescriptor)
+            _ = Darwin.close(readDescriptor)
+            #else
             _ = Glibc.close(writeDescriptor)
             _ = Glibc.close(readDescriptor)
+            #endif
         }
     }
 

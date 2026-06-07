@@ -68,7 +68,11 @@ final class BlockingPostgresConnection: @unchecked Sendable {
         let (exchanged, _) = closeState.compareExchange(expected: false, desired: true, ordering: .acquiringAndReleasing)
         guard exchanged else { return }
         _ = shutdown(descriptor, Int32(SHUT_RDWR))
+        #if canImport(Darwin)
+        _ = Darwin.close(descriptor)
+        #else
         _ = Glibc.close(descriptor)
+        #endif
     }
 
     deinit {
@@ -81,7 +85,11 @@ final class BlockingPostgresConnection: @unchecked Sendable {
         buffer.withUnsafeReadableBytes { raw in
             var offset = 0
             while offset < raw.count {
-                let written = send(descriptor, raw.baseAddress?.advanced(by: offset), raw.count - offset, Int32(MSG_NOSIGNAL))
+                #if canImport(Darwin)
+                let written = Darwin.send(descriptor, raw.baseAddress?.advanced(by: offset), raw.count - offset, 0)
+                #else
+                let written = Glibc.send(descriptor, raw.baseAddress?.advanced(by: offset), raw.count - offset, Int32(MSG_NOSIGNAL))
+                #endif
                 if written <= 0 { failed = true; return }
                 offset += written
             }
@@ -401,7 +409,11 @@ final class BlockingPostgresConnection: @unchecked Sendable {
         guard let base = frame.baseAddress else { return true }
         var offset = 0
         while offset < count {
-            let written = send(descriptor, base.advanced(by: offset), count - offset, Int32(MSG_NOSIGNAL))
+            #if canImport(Darwin)
+            let written = Darwin.send(descriptor, base.advanced(by: offset), count - offset, 0)
+            #else
+            let written = Glibc.send(descriptor, base.advanced(by: offset), count - offset, Int32(MSG_NOSIGNAL))
+            #endif
             if written <= 0 { return true }
             offset += written
         }
@@ -564,7 +576,11 @@ extension BlockingPostgresConnection {
     fileprivate static func openSocket(host: String, port: Int) throws(PostgresError) -> Int32 {
         var hints = addrinfo()
         hints.ai_family = AF_UNSPEC
+        #if canImport(Darwin)
+        hints.ai_socktype = SOCK_STREAM
+        #else
         hints.ai_socktype = Int32(SOCK_STREAM.rawValue)
+        #endif
         var resolved: UnsafeMutablePointer<addrinfo>?
         let status = getaddrinfo(host, String(port), &hints, &resolved)
         guard status == 0, let list = resolved else { throw PostgresError.connectFailed(reason: "could not resolve \(host):\(port)") }
@@ -588,8 +604,17 @@ extension BlockingPostgresConnection {
     private static func tryDial(_ candidate: UnsafeMutablePointer<addrinfo>) -> Lookup<Int32> {
         let descriptor = socket(candidate.pointee.ai_family, candidate.pointee.ai_socktype, candidate.pointee.ai_protocol)
         guard descriptor >= 0 else { return .notFound }
-        guard Glibc.connect(descriptor, candidate.pointee.ai_addr, candidate.pointee.ai_addrlen) == 0 else {
+        #if canImport(Darwin)
+        let dialed = Darwin.connect(descriptor, candidate.pointee.ai_addr, candidate.pointee.ai_addrlen)
+        #else
+        let dialed = Glibc.connect(descriptor, candidate.pointee.ai_addr, candidate.pointee.ai_addrlen)
+        #endif
+        guard dialed == 0 else {
+            #if canImport(Darwin)
+            _ = Darwin.close(descriptor)
+            #else
             _ = Glibc.close(descriptor)
+            #endif
             return .notFound
         }
         return .found(descriptor)
