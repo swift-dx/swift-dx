@@ -37,18 +37,18 @@ enum FrontendMessage {
     private static let textFormatCode: Int16 = 0
     private static let binaryFormatCode: Int16 = 1
 
-    static func startup(user: String, database: String, applicationName: String, allocator: ByteBufferAllocator) -> ByteBuffer {
+    static func startup(user: String, database: String, applicationName: String, searchPath: PostgresSearchPath, allocator: ByteBufferAllocator) -> ByteBuffer {
         var buffer = allocator.buffer(capacity: 96)
         let lengthIndex = buffer.writerIndex
         buffer.writeInteger(Int32(0))
         buffer.writeInteger(protocolVersion)
-        writeStartupParameters(into: &buffer, user: user, database: database, applicationName: applicationName)
+        writeStartupParameters(into: &buffer, user: user, database: database, applicationName: applicationName, searchPath: searchPath)
         buffer.writeInteger(UInt8(0))
         buffer.backpatchLength(at: lengthIndex)
         return buffer
     }
 
-    private static func writeStartupParameters(into buffer: inout ByteBuffer, user: String, database: String, applicationName: String) {
+    private static func writeStartupParameters(into buffer: inout ByteBuffer, user: String, database: String, applicationName: String, searchPath: PostgresSearchPath) {
         buffer.writeCString("user")
         buffer.writeCString(user)
         buffer.writeCString("database")
@@ -57,6 +57,10 @@ enum FrontendMessage {
         buffer.writeCString(applicationName)
         buffer.writeCString("client_encoding")
         buffer.writeCString("UTF8")
+        if case .schemas(let schemas) = searchPath {
+            buffer.writeCString("search_path")
+            buffer.writeCString(schemas.map { PostgresIdentifier.quoted($0) }.joined(separator: ","))
+        }
     }
 
     static func sslRequest(allocator: ByteBufferAllocator) -> ByteBuffer {

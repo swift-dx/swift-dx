@@ -17,7 +17,7 @@ import Testing
     @Test(.timeLimit(.minutes(1)))
     func connectToARefusedPortThrowsConnectFailed() {
         do {
-            _ = try BlockingPostgresConnection.connect(host: "127.0.0.1", port: 1, username: "app", password: "app", database: "app", applicationName: "test")
+            _ = try BlockingPostgresConnection.connect(host: "127.0.0.1", port: 1, username: "app", password: "app", database: "app", applicationName: "test", searchPath: .serverDefault)
             Issue.record("expected a connection to a refused port to throw")
         } catch let error as PostgresError {
             guard case .connectFailed = error else {

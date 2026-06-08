@@ -52,11 +52,11 @@ final class BlockingPostgresConnection: @unchecked Sendable {
         self.writeScratch = allocator.buffer(capacity: Self.initialWriteScratchBytes)
     }
 
-    static func connect(host: String, port: Int, username: String, password: String, database: String, applicationName: String) throws(PostgresError) -> BlockingPostgresConnection {
+    static func connect(host: String, port: Int, username: String, password: String, database: String, applicationName: String, searchPath: PostgresSearchPath) throws(PostgresError) -> BlockingPostgresConnection {
         let descriptor = try openSocket(host: host, port: port)
         let connection = BlockingPostgresConnection(descriptor: descriptor)
         do {
-            try connection.performStartup(username: username, password: password, database: database, applicationName: applicationName)
+            try connection.performStartup(username: username, password: password, database: database, applicationName: applicationName, searchPath: searchPath)
         } catch {
             connection.close()
             throw error
@@ -131,7 +131,11 @@ final class BlockingPostgresConnection: @unchecked Sendable {
     // Parameterized read over the extended protocol: the bound values are sent as
     // text parameters for $1, $2, …, never spliced into the SQL, and results come
     // back in text format streamed through the borrowed row view. The statement is
-    // parsed once and cached.
+    // parsed once and cached. The portal is described on every execution, not only
+    // the parse, because a cached statement carries no RowDescription on reuse and a
+    // re-plan (for example after the search path changes) can alter the result
+    // columns; describing the bound portal each time yields the column metadata that
+    // matches the rows this execution returns.
     func query(_ sql: String, bindings: [PostgresCell], onRow: (PostgresRowView) throws(PostgresError) -> Void) throws(PostgresError) -> [PostgresColumn] {
         guard bindings.count <= Self.maxBindParameters else {
             throw PostgresError.parameterCountMismatch(expected: Self.maxBindParameters, provided: bindings.count)
@@ -141,9 +145,7 @@ final class BlockingPostgresConnection: @unchecked Sendable {
             writeScratch.clear()
             let name = appendParseIfNeeded(plan, sql: sql, into: &writeScratch)
             FrontendMessage.appendBindTextResult(into: &writeScratch, statementName: name, parameters: bindings)
-            if case .parse = plan {
-                FrontendMessage.appendDescribePortal(into: &writeScratch, name: "")
-            }
+            FrontendMessage.appendDescribePortal(into: &writeScratch, name: "")
             FrontendMessage.appendExecute(into: &writeScratch, portalName: "", maxRows: 0)
             FrontendMessage.appendSync(into: &writeScratch)
             try writeAll(writeScratch)
@@ -625,8 +627,8 @@ extension BlockingPostgresConnection {
         _ = setsockopt(descriptor, Int32(IPPROTO_TCP), TCP_NODELAY, &enabled, socklen_t(MemoryLayout<Int32>.size))
     }
 
-    fileprivate func performStartup(username: String, password: String, database: String, applicationName: String) throws(PostgresError) {
-        try writeAll(FrontendMessage.startup(user: username, database: database, applicationName: applicationName, allocator: allocator))
+    fileprivate func performStartup(username: String, password: String, database: String, applicationName: String, searchPath: PostgresSearchPath) throws(PostgresError) {
+        try writeAll(FrontendMessage.startup(user: username, database: database, applicationName: applicationName, searchPath: searchPath, allocator: allocator))
         try authenticate(username: username, password: password)
         try awaitReadyForQuery()
     }

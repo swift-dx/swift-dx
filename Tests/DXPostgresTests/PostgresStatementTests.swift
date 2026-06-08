@@ -68,4 +68,27 @@ import Testing
         #expect(statement.sql == "SELECT $1")
         #expect(statement.bindings == [.bytes([])])
     }
+
+    @Test func identifierIsSplicedAsQuotedLiteralNotBound() {
+        let table = "users"
+        let statement: PostgresStatement = "SELECT id FROM \(identifier: table)"
+        #expect(statement.sql == "SELECT id FROM \"users\"")
+        #expect(statement.bindings.isEmpty)
+    }
+
+    @Test func identifierEscapesEmbeddedDoubleQuote() {
+        let table = "we\"ird"
+        let statement: PostgresStatement = "SELECT * FROM \(identifier: table)"
+        #expect(statement.sql == "SELECT * FROM \"we\"\"ird\"")
+        #expect(statement.bindings.isEmpty)
+    }
+
+    @Test func identifierAndBoundValueCoexist() {
+        let schema = "app"
+        let table = "users"
+        let email = "alice@example.com"
+        let statement: PostgresStatement = "SELECT id FROM \(identifier: schema).\(identifier: table) WHERE email = \(email)"
+        #expect(statement.sql == "SELECT id FROM \"app\".\"users\" WHERE email = $1")
+        #expect(statement.bindings == [.bytes(Array(email.utf8))])
+    }
 }

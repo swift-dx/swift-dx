@@ -43,7 +43,7 @@ private func elapsedSeconds(_ start: ContinuousClock.Instant) -> Double {
 private func rate(_ count: Int, _ seconds: Double) -> Int { seconds > 0 ? Int(Double(count) / seconds) : 0 }
 
 private func runThroughputExecute() throws {
-    let connection = try PostgresDirectConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: "dxlean")
+    let connection = try PostgresDirectConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: "dxlean", searchPath: .serverDefault)
     var matched = 0
     let start = ContinuousClock.now
     for _ in 0..<iterations {
@@ -57,7 +57,7 @@ private func runThroughputExecute() throws {
 }
 
 private func runThroughputStream() throws {
-    let connection = try PostgresDirectConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: "dxlean")
+    let connection = try PostgresDirectConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: "dxlean", searchPath: .serverDefault)
     var sum: Int64 = 0
     let start = ContinuousClock.now
     for _ in 0..<iterations {
@@ -72,7 +72,7 @@ private func runThroughputStream() throws {
 }
 
 private func runStreamDemo() throws {
-    let connection = try PostgresDirectConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: "dxlean")
+    let connection = try PostgresDirectConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: "dxlean", searchPath: .serverDefault)
     // Streaming, collected into a variable: the closure reads each borrowed row and
     // appends what it wants to keep, so `labels` is the materialized result.
     var labels: [String] = []
@@ -84,7 +84,7 @@ private func runStreamDemo() throws {
 }
 
 private func runThroughputScalar() throws {
-    let connection = try PostgresDirectConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: "dxlean")
+    let connection = try PostgresDirectConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: "dxlean", searchPath: .serverDefault)
     _ = try connection.queryScalarInt64Inline("SELECT $1::int8 AS n", value: 0)
     var checksum: Int64 = 0
     let start = ContinuousClock.now
@@ -100,7 +100,7 @@ private func runThroughputScalar() throws {
 }
 
 private func runContentionPoolScalar() async throws {
-    let pool = try PostgresBlockingPool(host: host, port: port, username: username, password: password, database: database, applicationName: "dxlean", size: concurrency)
+    let pool = try PostgresBlockingPool(host: host, port: port, username: username, password: password, database: database, applicationName: "dxlean", searchPath: .serverDefault, size: concurrency)
     let perClient = rowCount / clients
     let start = ContinuousClock.now
     let total = try await withThrowingTaskGroup(of: Int.self, returning: Int.self) { group in
@@ -124,7 +124,7 @@ private func runContentionPoolScalar() async throws {
 }
 
 private func runLeaseScalar() async throws {
-    let pool = try PostgresLeasePool(host: host, port: port, username: username, password: password, database: database, applicationName: "dxlean", size: concurrency, maxSubscriptions: 8)
+    let pool = try PostgresLeasePool(host: host, port: port, username: username, password: password, database: database, applicationName: "dxlean", searchPath: .serverDefault, size: concurrency, maxSubscriptions: 8)
     let perClient = rowCount / clients
     let start = ContinuousClock.now
     let total = try await withThrowingTaskGroup(of: Int.self, returning: Int.self) { group in
@@ -151,7 +151,7 @@ private func runLeaseScalar() async throws {
 
 private func runSelectDemo() async throws {
     // The client flow: open a client via the facade, send a statement, read back.
-    let postgres = try Postgres.connect(host: host, port: port, username: username, password: password, database: database, applicationName: "dxlean", poolSize: 4, maxSubscriptions: 8)
+    let postgres = try Postgres.connect(host: host, port: port, username: username, password: password, database: database, applicationName: "dxlean", searchPath: .serverDefault, poolSize: 4, maxSubscriptions: 8)
     defer { postgres.shutdown() }
 
     let result = try await postgres.execute("SELECT 1 AS id, 'hello world' AS label, NULL::text AS missing, 3.14 AS amount")
@@ -168,7 +168,7 @@ private func runSelectDemo() async throws {
 private func runNotifyDemo() async throws {
     let listener = try Postgres.subscribe(host: host, port: port, username: username, password: password, database: database, applicationName: "dxlisten", channels: ["dx_demo"])
     // Fire three notifications from a separate connection (as a trigger's pg_notify would).
-    let notifier = try PostgresDirectConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: "dxnotify")
+    let notifier = try PostgresDirectConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: "dxnotify", searchPath: .serverDefault)
     _ = try notifier.execute("NOTIFY dx_demo, '{\"op\":\"INSERT\",\"id\":1}'")
     _ = try notifier.execute("NOTIFY dx_demo, '{\"op\":\"UPDATE\",\"id\":1}'")
     _ = try notifier.execute("NOTIFY dx_demo, '{\"op\":\"DELETE\",\"id\":1}'")
@@ -183,13 +183,13 @@ private func runNotifyDemo() async throws {
 }
 
 private func runWatchDemo() async throws {
-    let admin = try PostgresDirectConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: "dxadmin")
+    let admin = try PostgresDirectConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: "dxadmin", searchPath: .serverDefault)
     _ = try admin.execute("DROP TABLE IF EXISTS dx_watch_test")
     _ = try admin.execute("CREATE TABLE dx_watch_test (id int, amount int)")
     admin.close()
     // Watch only rows whose amount > 100 — the filter runs server-side in the trigger.
     let listener = try Postgres.watchTable(host: host, port: port, username: username, password: password, database: database, applicationName: "dxwatch", table: "dx_watch_test", where: "NEW.amount > 100")
-    let writer = try PostgresDirectConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: "dxwriter")
+    let writer = try PostgresDirectConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: "dxwriter", searchPath: .serverDefault)
     _ = try writer.execute("INSERT INTO dx_watch_test VALUES (1, 50)")              // filtered out
     _ = try writer.execute("INSERT INTO dx_watch_test VALUES (2, 200)")             // matches
     _ = try writer.execute("UPDATE dx_watch_test SET amount = 300 WHERE id = 2")    // matches
@@ -213,7 +213,7 @@ private struct DemoAccount: Decodable, Sendable {
 }
 
 private func runTypedDemo() async throws {
-    let postgres = try Postgres.connect(PostgresConfiguration(host: host, port: port, username: username, password: password, database: database, applicationName: "dxtyped", poolSize: 2, maxSubscriptions: 8))
+    let postgres = try Postgres.connect(PostgresConfiguration(host: host, port: port, username: username, password: password, database: database, applicationName: "dxtyped", searchPath: .serverDefault, poolSize: 2, maxSubscriptions: 8))
     defer { postgres.shutdown() }
     // The interpolated value is an injection attempt; it is bound as $1, returned
     // verbatim as data, and never executed.
@@ -230,7 +230,7 @@ private func runTypedDemo() async throws {
 
 private func runServiceDemo() async throws {
     // config -> Service in a ServiceGroup -> ambient client -> query -> graceful shutdown
-    let configuration = PostgresConfiguration(host: host, port: port, username: username, password: password, database: database, applicationName: "dxservice", poolSize: 4, maxSubscriptions: 8)
+    let configuration = PostgresConfiguration(host: host, port: port, username: username, password: password, database: database, applicationName: "dxservice", searchPath: .serverDefault, poolSize: 4, maxSubscriptions: 8)
     let pool = try Postgres.service(configuration)
     var logger = Logger(label: "dxservice")
     logger.logLevel = .error
@@ -260,7 +260,7 @@ private func residentBytes() -> Int {
 
 private func runSoak() async throws {
     let seconds = envInt("POSTGRES_BENCH_SOAK_SECONDS", 20)
-    let pool = try PostgresLeasePool(host: host, port: port, username: username, password: password, database: database, applicationName: "dxsoak", size: concurrency, maxSubscriptions: 8)
+    let pool = try PostgresLeasePool(host: host, port: port, username: username, password: password, database: database, applicationName: "dxsoak", searchPath: .serverDefault, size: concurrency, maxSubscriptions: 8)
     defer { pool.shutdown() }
     let rssStart = residentBytes()
     let start = ContinuousClock.now

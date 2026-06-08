@@ -15,7 +15,7 @@ extension Postgres {
 
     /// Opens a pooled client from a configuration.
     public static func connect(_ configuration: PostgresConfiguration) throws(PostgresError) -> some PostgresClient {
-        try PostgresLeasePool(host: configuration.host, port: configuration.port, username: configuration.username, password: configuration.password, database: configuration.database, applicationName: configuration.applicationName, size: configuration.poolSize, maxSubscriptions: configuration.maxSubscriptions)
+        try PostgresLeasePool(host: configuration.host, port: configuration.port, username: configuration.username, password: configuration.password, database: configuration.database, applicationName: configuration.applicationName, searchPath: configuration.searchPath, size: configuration.poolSize, maxSubscriptions: configuration.maxSubscriptions)
     }
 
     /// Opens a pooled client that also runs as a ServiceLifecycle `Service`. Add the
@@ -23,7 +23,7 @@ extension Postgres {
     /// shutdown, and use the same value to run queries or bind it as the ambient
     /// client with ``withCurrent(_:_:)``.
     public static func service(_ configuration: PostgresConfiguration) throws(PostgresError) -> some PostgresClient & Service {
-        try PostgresLeasePool(host: configuration.host, port: configuration.port, username: configuration.username, password: configuration.password, database: configuration.database, applicationName: configuration.applicationName, size: configuration.poolSize, maxSubscriptions: configuration.maxSubscriptions)
+        try PostgresLeasePool(host: configuration.host, port: configuration.port, username: configuration.username, password: configuration.password, database: configuration.database, applicationName: configuration.applicationName, searchPath: configuration.searchPath, size: configuration.poolSize, maxSubscriptions: configuration.maxSubscriptions)
     }
 
     enum Ambient: Sendable {

@@ -58,8 +58,8 @@ public final class PostgresLeasePool: @unchecked Sendable {
     private let logger: Logger
     private let state: Mutex<PoolState>
 
-    public convenience init(host: String, port: Int, username: String, password: String, database: String, applicationName: String, size: Int, maxSubscriptions: Int) throws(PostgresError) {
-        let target = PostgresConnectionTarget(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName)
+    public convenience init(host: String, port: Int, username: String, password: String, database: String, applicationName: String, searchPath: PostgresSearchPath, size: Int, maxSubscriptions: Int) throws(PostgresError) {
+        let target = PostgresConnectionTarget(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName, searchPath: searchPath)
         let count = max(1, size)
         var connections: [BlockingPostgresConnection] = []
         connections.reserveCapacity(count)

@@ -66,7 +66,7 @@ import Glibc
         readyForQuery.withUnsafeBytes { _ = write(descriptors[1], $0.baseAddress, $0.count) }
 
         let connection = BlockingPostgresConnection(descriptor: descriptors[0])
-        let target = PostgresConnectionTarget(host: "127.0.0.1", port: 1, username: "x", password: "", database: "x", applicationName: "dx-test")
+        let target = PostgresConnectionTarget(host: "127.0.0.1", port: 1, username: "x", password: "", database: "x", applicationName: "dx-test", searchPath: .serverDefault)
         let listener = try PostgresListener(connection: connection, source: .reconnectable(target), channels: ["ch"], permit: .unlimited())
 
         close(descriptors[1])

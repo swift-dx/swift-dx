@@ -177,6 +177,13 @@ let package = Package(
             ],
             path: "IntegrationTests/DXClickHouseIntegration"
         ),
+        .testTarget(
+            name: "DXPostgresIntegration",
+            dependencies: [
+                "DXPostgres",
+            ],
+            path: "IntegrationTests/DXPostgresIntegration"
+        ),
         .target(
             name: "DXJSONSchema",
             dependencies: [

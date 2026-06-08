@@ -29,16 +29,18 @@ public struct PostgresConfiguration: Sendable {
     public let password: String
     public let database: String
     public let applicationName: String
+    public let searchPath: PostgresSearchPath
     public let poolSize: Int
     public let maxSubscriptions: Int
 
-    public init(host: String, port: Int, username: String, password: String, database: String, applicationName: String, poolSize: Int, maxSubscriptions: Int) {
+    public init(host: String, port: Int, username: String, password: String, database: String, applicationName: String, searchPath: PostgresSearchPath, poolSize: Int, maxSubscriptions: Int) {
         self.host = host
         self.port = port
         self.username = username
         self.password = password
         self.database = database
         self.applicationName = applicationName
+        self.searchPath = searchPath
         self.poolSize = poolSize
         self.maxSubscriptions = maxSubscriptions
     }

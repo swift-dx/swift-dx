@@ -57,6 +57,17 @@ public struct PostgresStatement: Sendable, ExpressibleByStringInterpolation {
         public mutating func appendInterpolation(_ value: Bool) { bind(value ? "t" : "f") }
         public mutating func appendInterpolation(_ value: [UInt8]) { bind("\\x" + value.map { String(format: "%02x", $0) }.joined()) }
 
+        /// Splices a single SQL identifier (a schema, table, or column name) into
+        /// the statement as literal SQL rather than a bound parameter, because a
+        /// parameter placeholder can only stand for a value, never an identifier.
+        /// The name is wrapped in double quotes and any embedded double quote is
+        /// doubled, so it is always parsed as one identifier and can never be read
+        /// as SQL syntax. Quote each component of a qualified name separately:
+        /// `"SELECT * FROM \(identifier: schema).\(identifier: table)"`.
+        public mutating func appendInterpolation(identifier: String) {
+            sql += PostgresIdentifier.quoted(identifier)
+        }
+
         private mutating func bind(_ text: String) {
             bindings.append(.bytes(Array(text.utf8)))
             sql += "$\(bindings.count)"

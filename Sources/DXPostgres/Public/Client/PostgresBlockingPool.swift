@@ -26,12 +26,12 @@ public final class PostgresBlockingPool: @unchecked Sendable {
     private let workers: [BlockingConnectionWorker]
     private let cursor = Atomic<UInt64>(0)
 
-    public convenience init(host: String, port: Int, username: String, password: String, database: String, applicationName: String, size: Int) throws(PostgresError) {
+    public convenience init(host: String, port: Int, username: String, password: String, database: String, applicationName: String, searchPath: PostgresSearchPath, size: Int) throws(PostgresError) {
         let count = max(1, size)
         var connections: [BlockingPostgresConnection] = []
         connections.reserveCapacity(count)
         for _ in 0..<count {
-            connections.append(try BlockingPostgresConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName))
+            connections.append(try BlockingPostgresConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName, searchPath: searchPath))
         }
         self.init(connections: connections)
     }

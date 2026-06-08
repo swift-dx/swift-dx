@@ -94,7 +94,7 @@ extension Postgres {
     /// ``watchTable(_:table:)`` instead, which installs the publishing
     /// trigger and subscribes for you.
     public static func subscribe(host: String, port: Int, username: String, password: String, database: String, applicationName: String, channels: [String]) throws(PostgresError) -> PostgresListener {
-        let target = PostgresConnectionTarget(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName)
+        let target = PostgresConnectionTarget(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName, searchPath: .serverDefault)
         return try PostgresListener(target: target, channels: channels)
     }
 
@@ -120,7 +120,7 @@ extension Postgres {
     /// changed row as JSON (`{"op":…, "row":…}`) on a channel derived from the table,
     /// then returns a listener subscribed to that channel. Fires for every changed row.
     public static func watchTable(host: String, port: Int, username: String, password: String, database: String, applicationName: String, table: String) throws(PostgresError) -> PostgresListener {
-        let target = PostgresConnectionTarget(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName)
+        let target = PostgresConnectionTarget(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName, searchPath: .serverDefault)
         return try watchTable(target: target, table: table, permit: .unlimited())
     }
 
@@ -129,7 +129,7 @@ extension Postgres {
     /// new row, for example `NEW.status = 'active'`. The filter runs in the server,
     /// so the client receives only matching changes.
     public static func watchTable(host: String, port: Int, username: String, password: String, database: String, applicationName: String, table: String, where filter: String) throws(PostgresError) -> PostgresListener {
-        let target = PostgresConnectionTarget(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName)
+        let target = PostgresConnectionTarget(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName, searchPath: .serverDefault)
         return try watchTable(target: target, table: table, where: filter, permit: .unlimited())
     }
 

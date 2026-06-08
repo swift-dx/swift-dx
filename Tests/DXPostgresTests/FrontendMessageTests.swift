@@ -26,7 +26,7 @@ import NIOCore
     }
 
     @Test func startupMessageCarriesProtocolAndParameters() {
-        let buffer = FrontendMessage.startup(user: "alice", database: "appdb", applicationName: "myapp", allocator: ByteBufferAllocator())
+        let buffer = FrontendMessage.startup(user: "alice", database: "appdb", applicationName: "myapp", searchPath: .serverDefault, allocator: ByteBufferAllocator())
         #expect(Int(buffer.getInteger(at: 0, as: Int32.self) ?? 0) == buffer.readableBytes)
         #expect(buffer.getInteger(at: 4, as: Int32.self) == 196608)
         let parameters = String(decoding: buffer.getBytes(at: 8, length: buffer.readableBytes - 8) ?? [], as: UTF8.self)
@@ -36,6 +36,20 @@ import NIOCore
         #expect(parameters.contains("appdb"))
         #expect(parameters.contains("application_name"))
         #expect(parameters.contains("client_encoding"))
+        #expect(!parameters.contains("search_path"))
+    }
+
+    @Test func startupMessageOmitsSearchPathForServerDefault() {
+        let buffer = FrontendMessage.startup(user: "alice", database: "appdb", applicationName: "myapp", searchPath: .serverDefault, allocator: ByteBufferAllocator())
+        let parameters = String(decoding: buffer.getBytes(at: 8, length: buffer.readableBytes - 8) ?? [], as: UTF8.self)
+        #expect(!parameters.contains("search_path"))
+    }
+
+    @Test func startupMessageCarriesQuotedSearchPathSchemas() {
+        let buffer = FrontendMessage.startup(user: "alice", database: "appdb", applicationName: "myapp", searchPath: .schemas(["app", "Mixed\"Case"]), allocator: ByteBufferAllocator())
+        let parameters = String(decoding: buffer.getBytes(at: 8, length: buffer.readableBytes - 8) ?? [], as: UTF8.self)
+        #expect(parameters.contains("search_path"))
+        #expect(parameters.contains("\"app\",\"Mixed\"\"Case\""))
     }
 
     // appendBindInt64 writes: tag(1) length(4) portal-cstring("")(1) statement-cstring("")(1)

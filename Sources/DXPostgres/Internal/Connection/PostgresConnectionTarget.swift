@@ -21,8 +21,9 @@ struct PostgresConnectionTarget: Sendable, Equatable {
     let password: String
     let database: String
     let applicationName: String
+    let searchPath: PostgresSearchPath
 
     func connect() throws(PostgresError) -> BlockingPostgresConnection {
-        try BlockingPostgresConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName)
+        try BlockingPostgresConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName, searchPath: searchPath)
     }
 }

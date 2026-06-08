@@ -30,8 +30,8 @@ public final class PostgresDirectConnection: @unchecked Sendable {
         self.connection = connection
     }
 
-    public static func connect(host: String, port: Int, username: String, password: String, database: String, applicationName: String) throws(PostgresError) -> PostgresDirectConnection {
-        PostgresDirectConnection(connection: try BlockingPostgresConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName))
+    public static func connect(host: String, port: Int, username: String, password: String, database: String, applicationName: String, searchPath: PostgresSearchPath) throws(PostgresError) -> PostgresDirectConnection {
+        PostgresDirectConnection(connection: try BlockingPostgresConnection.connect(host: host, port: port, username: username, password: password, database: database, applicationName: applicationName, searchPath: searchPath))
     }
 
     public func execute(_ sql: String) throws(PostgresError) -> PostgresResult {

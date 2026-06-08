@@ -48,7 +48,23 @@ password for a trust role.
 ```swift
 let configuration = PostgresConfiguration(
     host: "127.0.0.1", port: 5432, username: "app", password: "",
-    database: "app", applicationName: "myapp", poolSize: 8, maxSubscriptions: 16
+    database: "app", applicationName: "myapp", searchPath: .serverDefault,
+    poolSize: 8, maxSubscriptions: 16
+)
+```
+
+`searchPath` scopes how every connection resolves unqualified names, set once in
+the startup packet so no per-query qualification or per-transaction `SET` is
+needed. `.serverDefault` leaves the server's configured path untouched;
+`.schemas(["app", "public"])` resolves unqualified names against those schemas in
+order. To splice a schema, table, or column name into a statement (a parameter
+can only stand for a value, never an identifier), use `\(identifier:)`, which
+emits a quoted identifier rather than a bound parameter:
+
+```swift
+let rows = try await Postgres.query(
+    "SELECT id FROM \(identifier: schema).\(identifier: table) WHERE email = \(email)",
+    as: User.self
 )
 ```
 
